@@ -160,8 +160,7 @@ function firstDefined(...values) {
 
 function formatPlaytime(minutes, available = true) {
 	const mins = Number(minutes) || 0;
-	if (!available) return '无数据';
-	if (mins <= 0) return '未游玩';
+	if (!available || mins <= 0) return '无数据';
 	const hours = mins / 60;
 	if (hours < 10 && !Number.isInteger(Number(hours.toFixed(1)))) {
 		return `约 ${hours.toFixed(1)} 小时`;
@@ -1985,7 +1984,9 @@ class GameSelectModal extends Modal {
 
 		for (const game of this.filtered) {
 			const key = this.keyOf(game);
-			const hours = game.playtime_available === false ? '无数据' : `${((game.playtime_forever || 0) / 60).toFixed(1)} 小时`;
+			const hours = ((game.playtime_forever || 0) === 0 || game.playtime_available === false)
+				? '无数据'
+				: `${((game.playtime_forever || 0) / 60).toFixed(1)} 小时`;
 			const lastPlayed = formatDateFromTimestamp(game.rtime_last_played);
 			const local = this.library.get(key);
 			const installed = local && local.installed ? '已安装' : '未安装';
