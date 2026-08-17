@@ -1,4 +1,4 @@
-const { Plugin, PluginSettingTab, Setting, Modal, Notice, requestUrl, normalizePath } = require('obsidian');
+const { Plugin, PluginSettingTab, Setting, Modal, Notice, Menu, requestUrl, normalizePath } = require('obsidian');
 const fs = require('fs');
 const nodePath = require('path');
 
@@ -278,7 +278,7 @@ class SteamSyncPlugin extends Plugin {
 		await this.loadSettings();
 		await this.importSteamGridDBKeyIfNeeded();
 
-		this.addRibbonIcon('gamepad', '获取 Steam 游戏数据', () => this.fetchAndProcess());
+		this.addRibbonIcon('gamepad', '同步游戏数据', (evt) => this.openPlatformMenu(evt));
 		this.addCommand({
 			id: 'fetch-steam-games',
 			name: '获取 Steam 游戏数据',
@@ -308,6 +308,27 @@ class SteamSyncPlugin extends Plugin {
 	}
 
 	onunload() {}
+
+	openPlatformMenu(evt) {
+		const menu = new Menu();
+		menu.addItem((item) => item
+			.setTitle('Steam')
+			.setIcon('gamepad')
+			.onClick(() => this.fetchAndProcess()));
+		menu.addItem((item) => item
+			.setTitle('PSN')
+			.setIcon('gamepad')
+			.onClick(() => this.fetchPsnAndProcess()));
+		menu.addItem((item) => item
+			.setTitle('Xbox')
+			.setIcon('gamepad')
+			.onClick(() => this.fetchXboxAndProcess()));
+		menu.addItem((item) => item
+			.setTitle('Epic')
+			.setIcon('gamepad')
+			.onClick(() => this.fetchEpicAndProcess()));
+		menu.showAtMouseEvent(evt);
+	}
 
 	async loadSettings() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -1010,32 +1031,6 @@ class SteamSyncPlugin extends Plugin {
 		this.settings.platformAppidMap[`${platform}:${String(game.id)}`] = file.path;
 	}
 
-	async createPlatformGameFile(platform, game, library) {
-		const config = this.getPlatformConfig(platform);
-		const data = await this.buildPlatformTemplateData(platform, game, library);
-		const template = this.renderPlatformTemplate(platform, this.settings.template, data);
-		const folder = String(this.settings.folder || '').trim();
-		if (folder) await this.ensureFolder(folder);
-
-		const baseName = sanitizeFileName(data.name || String(game.id));
-		let filePath = folder
-			? normalizePath(`${folder}/${baseName}.md`)
-			: normalizePath(`${baseName}.md`);
-
-		let index = 1;
-		while (this.app.vault.getAbstractFileByPath(filePath)) {
-			filePath = folder
-				? normalizePath(`${folder}/${baseName} ${index}.md`)
-				: normalizePath(`${baseName} ${index}.md`);
-			index++;
-		}
-
-		const file = await this.app.vault.create(filePath, template);
-		this.settings.platformAppidMap[`${platform}:${String(game.id)}`] = file.path;
-		await this.appendIndexLink(file.basename);
-		return filePath;
-	}
-
 	async buildPlatformTemplateData(platform, game, library) {
 		const local = library && game.id ? library.get(String(game.id)) : null;
 		const installed = !!(local && local.installed);
@@ -1491,9 +1486,8 @@ class SteamSyncPlugin extends Plugin {
 			const game = games[i];
 			const notice = new Notice(`正在创建 ${i + 1}/${games.length}：${game.name}`, 0);
 			try {
-				const path = platform
-					? await this.createPlatformGameFile(platform, game, library)
-					: await this.createGameFile(game, await this.fetchAppDetails(game.appid), library);
+				const details = platform ? null : await this.fetchAppDetails(game.appid);
+				const path = await this.createGameFile(game, details, library, platform);
 				created++;
 				console.log(`[Steam Sync] 已创建 ${path}`);
 			} catch (e) {
@@ -1508,13 +1502,17 @@ class SteamSyncPlugin extends Plugin {
 		new Notice(`创建完成：成功 ${created} 个，失败 ${failed} 个`);
 	}
 
-	async createGameFile(game, details, library) {
-		const data = await this.buildTemplateData(game, details, library);
-		const content = this.renderTemplate(this.settings.template, data);
+	async createGameFile(game, details, library, platform) {
+		const data = platform
+			? await this.buildPlatformTemplateData(platform, game, library)
+			: await this.buildTemplateData(game, details, library);
+		const content = platform
+			? this.renderPlatformTemplate(platform, this.settings.template, data)
+			: this.renderTemplate(this.settings.template, data);
 		const folder = String(this.settings.folder || '').trim();
 		if (folder) await this.ensureFolder(folder);
 
-		const baseName = sanitizeFileName(data.name || String(game.appid));
+		const baseName = sanitizeFileName(data.name || String(platform ? game.id : game.appid));
 		let filePath = folder
 			? normalizePath(`${folder}/${baseName}.md`)
 			: normalizePath(`${baseName}.md`);
@@ -1528,12 +1526,10 @@ class SteamSyncPlugin extends Plugin {
 		}
 
 		const file = await this.app.vault.create(filePath, content);
-		this.settings.appidMap[String(game.appid)] = file.path;
-		if (this.settings.syncAchievements && data.achievements) {
-			await this.updateFrontmatter(file, { 成就: data.achievements });
-		}
-		if (this.settings.writeAchievementList && data.achievement_list) {
-			await this.upsertAchievementSection(file, data.achievement_list);
+		if (platform) {
+			this.settings.platformAppidMap[`${platform}:${String(game.id)}`] = file.path;
+		} else {
+			this.settings.appidMap[String(game.appid)] = file.path;
 		}
 		await this.appendIndexLink(file.basename);
 		return filePath;
