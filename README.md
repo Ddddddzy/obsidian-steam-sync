@@ -1,6 +1,6 @@
 # Steam Sync
 
-从 Steam 拉取游戏库，按「资源」模板创建游戏笔记，并同步已有笔记的游玩时长和成就。实验性支持 PSN、Xbox、Epic 游戏库读取。
+从 Steam 拉取游戏库，按「资源」模板创建游戏笔记，并同步已有笔记的游玩时长与成就。实验性支持 PSN、Xbox、Epic 游戏库读取。
 
 ## 安装
 
@@ -22,7 +22,7 @@
 
 - 设置：PSN Access Token（推荐，浏览器 Network 里复制 `Bearer` 后面的值）；也可填 NPSSO 尝试自动交换
 - 命令：`获取 PSN 游戏数据`
-- 读取：游戏列表、最近游玩、封面；`时长` 仅在接口返回时写入，否则为「未游玩」
+- 读取：游戏列表、最近游玩、封面、`playDuration` 时长（ISO 8601，如 `PT1H51M21S`）
 - 已有笔记按 `psn_appid` 或「英文名」匹配
 
 ## Xbox（实验性）
@@ -31,7 +31,8 @@
 
 - 设置：Xbox XBL3.0 Authorization（浏览器 Network 里复制完整 `Authorization` 请求头）；xuid 可留空自动获取
 - 命令：`获取 Xbox 游戏数据`
-- 读取：游戏列表、最近游玩、封面；`时长` 仅在接口返回时写入
+- 读取：游戏列表、最近游玩、封面、成就
+- 时长通过 `userstats.xboxlive.com` 的 `MinutesPlayed` 逐游戏获取，同步/创建时写入；部分游戏不暴露该统计，则写为「未游玩」
 - 已有笔记按 `xbox_appid` 或「英文名」匹配
 
 ## Epic（实验性）
@@ -50,35 +51,25 @@
 - 模板占位符：`{{name}} {{english_name}} {{appid}} {{playtime}} {{playtime_hours}} {{playtime_minutes}} {{last_played}} {{achievements}} {{achievement_list}} {{cover}} {{status}} {{source}} {{path}} {{size}} {{date}}`
 - 非 Steam 平台创建时，会把默认模板中的 `来源: Steam` 和 `steam_appid` 替换为对应平台字段
 
-## 成就（Steam）
+## 成就
 
 - frontmatter 写入 `成就: 12/54`，看板卡片会显示完成度
-- 笔记底部 `## 成就` 写成 Markdown 表格：图标、名字、说明、时间、所有玩家完成百分比
+- 笔记底部 `## 成就` 写成 Markdown 表格：图标、名字、说明、时间（Steam 另含所有玩家完成百分比）
 - 图标用表格单元格里的 `<img>`，避免 `![|48]` 把表格拆坏
-- 数据写在笔记本地，打开预览不必再实时请求 Steam
-- 没有 Steam 成就、或统计未公开的游戏会写成 `无`
+- 数据写在笔记本地，打开预览不必再实时请求
+- 没有成就、或统计未公开的游戏会写成 `无`
 
 ## 发布到 GitHub
 
-### 方式 A：自动创建仓库并推送（推荐）
+仓库已初始化为 git，直接提交并推送即可：
 
-1. 先安装并登录 GitHub CLI：
-   ```powershell
-   winget install GitHub.cli
-   gh auth login
-   ```
-2. 双击 `create_and_push_github.bat`
-3. 脚本会自动创建公共仓库 `obsidian-steam-sync` 并推送
+```powershell
+git add -A
+git commit -m "your message"
+git push origin master
+```
 
-> 想创建私有仓库，把脚本里的 `--public` 改成 `--private`。
-
-### 方式 B：手动创建仓库后推送
-
-1. 在 github.com 新建空仓库（不要勾选 README）
-2. 双击 `push_to_github.bat`
-3. 输入仓库地址，例如 `https://github.com/你的用户名/obsidian-steam-sync.git`
-
-`.gitignore` 已忽略 `data.json`，不会把 API Key / Token 推上去。
+> `.gitignore` 已忽略 `data.json`，不会把 API Key / Token 推上去。
 
 ## 说明
 

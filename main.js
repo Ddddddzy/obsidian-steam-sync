@@ -159,7 +159,6 @@ function formatPlaytime(minutes) {
 	const mins = Number(minutes) || 0;
 	if (mins <= 0) return '未游玩';
 	const hours = mins / 60;
-	if (hours < 1) return `约 ${hours.toFixed(1)} 小时`;
 	if (hours < 10 && !Number.isInteger(Number(hours.toFixed(1)))) {
 		return `约 ${hours.toFixed(1)} 小时`;
 	}
@@ -171,10 +170,7 @@ function formatSize(bytes) {
 	if (n <= 0) return '';
 	const gb = n / (1024 ** 3);
 	if (gb >= 10) return `${Math.round(gb)} GB`;
-	if (gb >= 1) {
-		const rounded = Math.round(gb * 10) / 10;
-		return Number.isInteger(rounded) ? `${rounded} GB` : `${rounded} GB`;
-	}
+	if (gb >= 1) return `${Math.round(gb * 10) / 10} GB`;
 	if (gb >= 0.1) return `${gb.toFixed(1)} GB`;
 	const mb = n / (1024 ** 2);
 	return `${Math.round(mb * 10) / 10}MB`;
@@ -398,7 +394,7 @@ class SteamSyncPlugin extends Plugin {
 				return;
 			}
 
-			new GameSelectModal(this, candidates, library).open();
+			new GameSelectModal(this, candidates, library, null).open();
 		} catch (e) {
 			notice.hide();
 			console.error('[Steam Sync] 获取失败', e);
@@ -445,6 +441,7 @@ class SteamSyncPlugin extends Plugin {
 				label: 'PSN',
 				appidKey: 'psn_appid',
 				sourceLabel: 'PSN',
+				hasListPlaytime: true,
 				notice: '请先在设置中填写 PSN Access Token（或 NPSSO）'
 			},
 			xbox: {
@@ -515,7 +512,7 @@ class SteamSyncPlugin extends Plugin {
 				if (file) {
 					await this.syncPlatformGameToFile(platform, game, file);
 					syncedCount++;
-					if (platform === 'xbox' && this.settings.syncAchievements) await sleep(150);
+					if (platform === 'xbox') await sleep(150);
 				} else {
 					newGames.push(game);
 				}
@@ -529,7 +526,7 @@ class SteamSyncPlugin extends Plugin {
 			}
 
 			let candidates = newGames;
-			if (this.settings.showOnlyPlayed) {
+			if (this.settings.showOnlyPlayed && config.hasListPlaytime) {
 				candidates = candidates.filter((g) => (g.playtime_forever || 0) > 0);
 			}
 			candidates.sort((a, b) => (b.playtime_forever || 0) - (a.playtime_forever || 0));
@@ -539,7 +536,7 @@ class SteamSyncPlugin extends Plugin {
 				return;
 			}
 
-			new PlatformGameSelectModal(this, platform, candidates, library).open();
+			new GameSelectModal(this, candidates, library, platform).open();
 		} catch (e) {
 			notice.hide();
 			console.error(`[Steam Sync] 获取 ${config.label} 数据失败`, e);
@@ -580,14 +577,13 @@ class SteamSyncPlugin extends Plugin {
 		const json = resp.json;
 		const titles = (json && Array.isArray(json.titles)) ? json.titles : (json && Array.isArray(json.data) ? json.data : []);
 		return titles.map((t, idx) => {
-			const id = firstDefined(t.npTitleId, t.titleId, t.conceptId, t.id, `psn-${idx}`);
-			const cover = firstDefined(t.conceptIconUrl, t.imageUrl, t.coverUrl, '');
+			const cover = firstDefined(t.imageUrl, t.conceptIconUrl, t.coverUrl, '');
 			return {
-				id: String(id),
-				name: firstDefined(t.titleName, t.name, t.title, `PSN 游戏 ${idx + 1}`),
+				id: String(firstDefined(t.titleId, t.npTitleId, t.conceptId, t.id, `psn-${idx}`)),
+				name: firstDefined(t.name, t.titleName, t.title, `PSN 游戏 ${idx + 1}`),
 				platform: 'PSN',
 				source: 'PSN',
-				playtime_forever: parseDurationToMinutes(firstDefined(t.playedDuration, t.playDuration, t.totalPlayTime, 0)),
+				playtime_forever: parseDurationToMinutes(firstDefined(t.playDuration, t.playedDuration, t.totalPlayTime, 0)),
 				rtime_last_played: parseIsoDateToTimestamp(firstDefined(t.lastPlayedDateTime, t.lastPlayedDate, '')),
 				cover,
 				thumbnail: cover,
@@ -659,7 +655,7 @@ class SteamSyncPlugin extends Plugin {
 		const baseHeaders = this.getXboxAuthHeaders();
 		const xuid = await this.getXboxXuid(baseHeaders);
 
-		const url = `https://titlehub.xboxlive.com/users/xuid(${encodeURIComponent(xuid)})/titles/titlehistory/decoration/Scid,image,achievement,stats?maxItems=1000`;
+		const url = `https://titlehub.xboxlive.com/users/xuid(${encodeURIComponent(xuid)})/titles/titlehistory/decoration/Scid,image,achievement?maxItems=1000`;
 		let resp;
 		try {
 			resp = await requestUrl({
@@ -692,23 +688,13 @@ class SteamSyncPlugin extends Plugin {
 			const achievements = (ach.currentAchievements != null && ach.totalAchievements != null)
 				? `${ach.currentAchievements}/${ach.totalAchievements}`
 				: '';
-			const titleId = String(firstDefined(t.titleId, t.pfn, `xbox-${idx}`));
-			const scid = String(firstDefined(t.serviceConfigId, t.scid, ''));
-			const titleStatsMap = collectNamedStatValues(t.stats || t, 'MinutesPlayed');
-			const titleMinutes = titleStatsMap.size ? Array.from(titleStatsMap.values())[0] : 0;
 			return {
-				id: titleId,
-				scid,
+				id: String(firstDefined(t.titleId, t.pfn, `xbox-${idx}`)),
+				scid: String(firstDefined(t.serviceConfigId, t.scid, '')),
 				name: firstDefined(t.name, t.titleName, `Xbox 游戏 ${idx + 1}`),
 				platform: 'Xbox',
 				source: 'Xbox',
-				playtime_forever: parseDurationToMinutes(firstDefined(
-					titleMinutes,
-					t.minutesPlayed,
-					t.playtime,
-					history.minutesPlayed,
-					0
-				)),
+				playtime_forever: 0,
 				rtime_last_played: parseIsoDateToTimestamp(firstDefined(history.lastTimePlayed, t.lastTimePlayed, '')),
 				cover: coverUrl,
 				thumbnail: coverUrl,
@@ -822,10 +808,31 @@ class SteamSyncPlugin extends Plugin {
 		};
 	}
 
-
-
-
-
+	async fetchXboxMinutesPlayed(xuid, scid) {
+		if (!xuid || !scid) return 0;
+		try {
+			const url = `https://userstats.xboxlive.com/users/xuid(${encodeURIComponent(xuid)})/scids/${encodeURIComponent(scid)}/stats/MinutesPlayed`;
+			const baseHeaders = this.getXboxAuthHeaders();
+			const resp = await requestUrl({
+				url,
+				method: 'GET',
+				headers: {
+					...baseHeaders,
+					'x-xbl-contract-version': '2',
+					Accept: 'application/json'
+				}
+			});
+			if (resp.status < 200 || resp.status >= 300) return 0;
+			const json = resp.json;
+			const collections = json && (json.statlistscollection || json.statListsCollection || []);
+			const stats = Array.isArray(collections) && collections[0] ? collections[0].stats : null;
+			const value = Array.isArray(stats) && stats[0] ? stats[0].value : 0;
+			return Math.max(0, Number(value) || 0);
+		} catch (e) {
+			console.warn('[Steam Sync] Xbox 时长获取失败', scid, e);
+			return 0;
+		}
+	}
 
 	async fetchEpicGames() {
 		const token = String(this.settings.epicAccessToken || '').trim();
@@ -980,21 +987,20 @@ class SteamSyncPlugin extends Plugin {
 
 	async syncPlatformGameToFile(platform, game, file) {
 		const config = this.getPlatformConfig(platform);
-		let ach = null;
-		let xuid = '';
-
-		if (platform === 'xbox') {
-			xuid = await this.getXboxXuid(this.getXboxAuthHeaders());
-		}
-
 		const updates = {
 			时长: formatPlaytime(game.playtime_forever || 0)
 		};
 
-		if (platform === 'xbox' && this.settings.syncAchievements) {
-			ach = await this.fetchXboxAchievements(xuid, game.id, game.scid);
-			if (ach.available) updates.成就 = `${ach.unlocked}/${ach.total}`;
-			else if (ach.reason === 'none') updates.成就 = game.achievements || '无';
+		let ach = null;
+		if (platform === 'xbox') {
+			const xuid = await this.getXboxXuid(this.getXboxAuthHeaders());
+			const minutes = await this.fetchXboxMinutesPlayed(xuid, game.scid);
+			if (minutes > 0) updates.时长 = formatPlaytime(minutes);
+			if (this.settings.syncAchievements) {
+				ach = await this.fetchXboxAchievements(xuid, game.id, game.scid);
+				if (ach.available) updates.成就 = `${ach.unlocked}/${ach.total}`;
+				else if (ach.reason === 'none') updates.成就 = game.achievements || '无';
+			}
 		} else if (game.achievements) {
 			updates.成就 = game.achievements;
 		}
@@ -1010,28 +1016,6 @@ class SteamSyncPlugin extends Plugin {
 		}
 
 		this.settings.platformAppidMap[`${platform}:${String(game.id)}`] = file.path;
-	}
-
-	async createSelectedPlatformGames(platform, games, library) {
-		let created = 0;
-		let failed = 0;
-		for (let i = 0; i < games.length; i++) {
-			const game = games[i];
-			const notice = new Notice(`正在创建 ${i + 1}/${games.length}：${game.name}`, 0);
-			try {
-				const path = await this.createPlatformGameFile(platform, game, library);
-				created++;
-				console.log(`[Steam Sync] 已创建 ${path}`);
-			} catch (e) {
-				failed++;
-				console.error(`[Steam Sync] 创建 ${game.name} 失败`, e);
-			} finally {
-				notice.hide();
-			}
-			if (i < games.length - 1) await sleep(150);
-		}
-		await this.saveSettings();
-		new Notice(`创建完成：成功 ${created} 个，失败 ${failed} 个`);
 	}
 
 	async createPlatformGameFile(platform, game, library) {
@@ -1070,6 +1054,8 @@ class SteamSyncPlugin extends Plugin {
 		let achievement_list = '';
 		if (platform === 'xbox') {
 			const xuid = await this.getXboxXuid(this.getXboxAuthHeaders());
+			const played = await this.fetchXboxMinutesPlayed(xuid, game.scid);
+			if (played > 0) minutes = played;
 			if (this.settings.syncAchievements) {
 				const ach = await this.fetchXboxAchievements(xuid, game.id, game.scid);
 				achievements = ach.available ? `${ach.unlocked}/${ach.total}` : (game.achievements || '无');
@@ -1506,15 +1492,16 @@ class SteamSyncPlugin extends Plugin {
 		return String(value);
 	}
 
-	async createSelectedGames(games, library) {
+	async createSelectedGames(games, library, platform) {
 		let created = 0;
 		let failed = 0;
 		for (let i = 0; i < games.length; i++) {
 			const game = games[i];
 			const notice = new Notice(`正在创建 ${i + 1}/${games.length}：${game.name}`, 0);
 			try {
-				const details = await this.fetchAppDetails(game.appid);
-				const path = await this.createGameFile(game, details, library);
+				const path = platform
+					? await this.createPlatformGameFile(platform, game, library)
+					: await this.createGameFile(game, await this.fetchAppDetails(game.appid), library);
 				created++;
 				console.log(`[Steam Sync] 已创建 ${path}`);
 			} catch (e) {
@@ -1523,7 +1510,7 @@ class SteamSyncPlugin extends Plugin {
 			} finally {
 				notice.hide();
 			}
-			if (i < games.length - 1) await sleep(250);
+			if (i < games.length - 1) await sleep(platform ? 150 : 250);
 		}
 		await this.saveSettings();
 		new Notice(`创建完成：成功 ${created} 个，失败 ${failed} 个`);
@@ -1641,20 +1628,27 @@ class SteamSyncPlugin extends Plugin {
 }
 
 class GameSelectModal extends Modal {
-	constructor(plugin, games, library) {
+	constructor(plugin, games, library, platform) {
 		super(plugin.app);
 		this.plugin = plugin;
 		this.games = games;
 		this.library = library || new Map();
+		this.platform = platform || null;
+		this.config = platform ? plugin.getPlatformConfig(platform) : null;
 		this.selected = new Set();
 		this.filtered = games;
+	}
+
+	keyOf(game) {
+		return this.platform ? String(game.id) : String(game.appid);
 	}
 
 	onOpen() {
 		this.modalEl.addClass('steam-sync-modal');
 		const { contentEl } = this;
 		contentEl.empty();
-		contentEl.createEl('h2', { text: '选择要创建的游戏' });
+		const title = this.platform ? `选择要创建的 ${this.config.label} 游戏` : '选择要创建的游戏';
+		contentEl.createEl('h2', { text: title });
 		contentEl.createEl('p', {
 			cls: 'steam-sync-hint',
 			text: `已有笔记的游戏不会出现在这里。共 ${this.games.length} 个新游戏，勾选后创建「资源」模板笔记。`
@@ -1670,11 +1664,11 @@ class GameSelectModal extends Modal {
 
 		const buttonRow = contentEl.createDiv({ cls: 'steam-sync-actions' });
 		buttonRow.createEl('button', { text: '全选' }).addEventListener('click', () => {
-			for (const game of this.filtered) this.selected.add(String(game.appid));
+			for (const game of this.filtered) this.selected.add(this.keyOf(game));
 			this.renderList(searchInput.value);
 		});
 		buttonRow.createEl('button', { text: '全不选' }).addEventListener('click', () => {
-			for (const game of this.filtered) this.selected.delete(String(game.appid));
+			for (const game of this.filtered) this.selected.delete(this.keyOf(game));
 			this.renderList(searchInput.value);
 		});
 		const confirmBtn = buttonRow.createEl('button', { text: '创建选中的游戏', cls: 'mod-cta' });
@@ -1692,135 +1686,31 @@ class GameSelectModal extends Modal {
 		}
 
 		for (const game of this.filtered) {
-			const appid = String(game.appid);
+			const key = this.keyOf(game);
 			const hours = ((game.playtime_forever || 0) / 60).toFixed(1);
 			const lastPlayed = formatDateFromTimestamp(game.rtime_last_played);
-			const local = this.library.get(appid);
+			const local = this.library.get(key);
 			const installed = local && local.installed ? '已安装' : '未安装';
 
 			const row = this.listEl.createEl('label', { cls: 'steam-sync-row' });
-			if (this.selected.has(appid)) row.addClass('is-selected');
+			if (this.selected.has(key)) row.addClass('is-selected');
 
 			const checkbox = row.createEl('input');
 			checkbox.type = 'checkbox';
-			checkbox.checked = this.selected.has(appid);
+			checkbox.checked = this.selected.has(key);
 			checkbox.addEventListener('change', () => {
-				if (checkbox.checked) this.selected.add(appid);
-				else this.selected.delete(appid);
+				if (checkbox.checked) this.selected.add(key);
+				else this.selected.delete(key);
 				row.toggleClass('is-selected', checkbox.checked);
 			});
 
-			row.createEl('img', {
-				cls: 'steam-sync-thumb',
-				attr: {
-					src: `https://cdn.cloudflare.steamstatic.com/steam/apps/${appid}/capsule_231x87.jpg`,
-					alt: game.name
-				}
-			});
-
-			const info = row.createDiv({ cls: 'steam-sync-info' });
-			info.createDiv({ cls: 'steam-sync-name', text: game.name });
-			info.createDiv({
-				cls: 'steam-sync-meta',
-				text: `${hours} 小时 · 最后玩 ${lastPlayed} · ${installed}`
-			});
-		}
-	}
-
-	onConfirm() {
-		if (this.selected.size === 0) {
-			new Notice('请至少选择一个游戏');
-			return;
-		}
-		const selectedGames = this.games.filter((g) => this.selected.has(String(g.appid)));
-		this.close();
-		this.plugin.createSelectedGames(selectedGames, this.library);
-	}
-
-	onClose() {
-		this.contentEl.empty();
-	}
-}
-
-class PlatformGameSelectModal extends Modal {
-	constructor(plugin, platform, games, library) {
-		super(plugin.app);
-		this.plugin = plugin;
-		this.platform = platform;
-		this.config = plugin.getPlatformConfig(platform);
-		this.games = games;
-		this.library = library || new Map();
-		this.selected = new Set();
-		this.filtered = games;
-	}
-
-	onOpen() {
-		this.modalEl.addClass('steam-sync-modal');
-		const { contentEl } = this;
-		contentEl.empty();
-		contentEl.createEl('h2', { text: `选择要创建的 ${this.config.label} 游戏` });
-		contentEl.createEl('p', {
-			cls: 'steam-sync-hint',
-			text: `已有笔记的游戏不会出现在这里。共 ${this.games.length} 个新游戏，勾选后创建「资源」模板笔记。`
-		});
-
-		const searchInput = contentEl.createEl('input', { cls: 'steam-sync-search' });
-		searchInput.type = 'text';
-		searchInput.placeholder = '搜索游戏...';
-		searchInput.addEventListener('input', () => this.renderList(searchInput.value));
-
-		this.listEl = contentEl.createDiv({ cls: 'steam-sync-list' });
-		this.renderList('');
-
-		const buttonRow = contentEl.createDiv({ cls: 'steam-sync-actions' });
-		buttonRow.createEl('button', { text: '全选' }).addEventListener('click', () => {
-			for (const game of this.filtered) this.selected.add(String(game.id));
-			this.renderList(searchInput.value);
-		});
-		buttonRow.createEl('button', { text: '全不选' }).addEventListener('click', () => {
-			for (const game of this.filtered) this.selected.delete(String(game.id));
-			this.renderList(searchInput.value);
-		});
-		const confirmBtn = buttonRow.createEl('button', { text: '创建选中的游戏', cls: 'mod-cta' });
-		confirmBtn.addEventListener('click', () => this.onConfirm());
-		buttonRow.createEl('button', { text: '取消' }).addEventListener('click', () => this.close());
-	}
-
-	renderList(filter) {
-		this.listEl.empty();
-		const lower = String(filter || '').toLowerCase();
-		this.filtered = this.games.filter((g) => String(g.name || '').toLowerCase().includes(lower));
-		if (!this.filtered.length) {
-			this.listEl.createEl('div', { text: '没有匹配的游戏' });
-			return;
-		}
-
-		for (const game of this.filtered) {
-			const id = String(game.id);
-			const hours = ((game.playtime_forever || 0) / 60).toFixed(1);
-			const lastPlayed = formatDateFromTimestamp(game.rtime_last_played);
-			const local = this.library.get(id);
-			const installed = local && local.installed ? '已安装' : '未安装';
-
-			const row = this.listEl.createEl('label', { cls: 'steam-sync-row' });
-			if (this.selected.has(id)) row.addClass('is-selected');
-
-			const checkbox = row.createEl('input');
-			checkbox.type = 'checkbox';
-			checkbox.checked = this.selected.has(id);
-			checkbox.addEventListener('change', () => {
-				if (checkbox.checked) this.selected.add(id);
-				else this.selected.delete(id);
-				row.toggleClass('is-selected', checkbox.checked);
-			});
-
-			if (game.thumbnail) {
+			const thumb = this.platform
+				? game.thumbnail
+				: `https://cdn.cloudflare.steamstatic.com/steam/apps/${key}/capsule_231x87.jpg`;
+			if (thumb) {
 				row.createEl('img', {
 					cls: 'steam-sync-thumb',
-					attr: {
-						src: game.thumbnail,
-						alt: game.name
-					}
+					attr: { src: thumb, alt: game.name }
 				});
 			}
 
@@ -1838,9 +1728,9 @@ class PlatformGameSelectModal extends Modal {
 			new Notice('请至少选择一个游戏');
 			return;
 		}
-		const selectedGames = this.games.filter((g) => this.selected.has(String(g.id)));
+		const selectedGames = this.games.filter((g) => this.selected.has(this.keyOf(g)));
 		this.close();
-		this.plugin.createSelectedPlatformGames(this.platform, selectedGames, this.library);
+		this.plugin.createSelectedGames(selectedGames, this.library, this.platform);
 	}
 
 	onClose() {
@@ -1939,7 +1829,7 @@ class SteamSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('只显示有游玩时长的新游戏')
-			.setDesc('开启后，选择窗口只列出时长大于 0、且还没有笔记的游戏')
+			.setDesc('开启后，选择窗口只列出时长大于 0、且还没有笔记的游戏（仅 Steam / PSN 生效，Xbox 与 Epic 时长需逐游戏获取）')
 			.addToggle((toggle) => {
 				toggle.setValue(this.plugin.settings.showOnlyPlayed)
 					.onChange(async (value) => {
