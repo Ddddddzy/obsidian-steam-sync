@@ -608,7 +608,7 @@ class SteamSyncPlugin extends Plugin {
 					'Content-Type': 'application/x-www-form-urlencoded',
 					Authorization: 'Basic MDk1MTUxNTktNzIzNy00MzcwLTliNDAtMzgwNmU2N2MwODkxOnVjUGprYTV0bnRCMktxc1A='
 				},
-				body: `grant_type=refresh_token&token_format=jwt&scope=${encodeURIComponent('psn:mobile.v1 psn:clientapp')}&refresh_token=${encodeURIComponent(refreshToken)}`,
+				body: `grant_type=refresh_token&token_format=jwt&scope=${encodeURIComponent('psn:mobile.v2.core psn:clientapp')}&refresh_token=${encodeURIComponent(refreshToken)}`,
 				throw: false
 			});
 			const json = resp.json || {};
@@ -748,7 +748,7 @@ class SteamSyncPlugin extends Plugin {
 
 		return all.map((tt, idx) => {
 			const defined = sumTrophyCounts(tt.definedTrophies);
-			const earned = sumTrophyCounts(tt.progressedTrophies);
+			const earned = sumTrophyCounts(tt.earnedTrophies);
 			const name = firstDefined(tt.trophyTitleName, tt.titleName, `PSN 游戏 ${idx + 1}`);
 			const cover = firstDefined(tt.trophyTitleIconUrl, tt.defaultTrophyGroupIconUrl, '');
 			return {
@@ -765,7 +765,7 @@ class SteamSyncPlugin extends Plugin {
 				achievements: defined > 0 ? `${earned}/${defined}` : '',
 				trophyEarned: earned,
 				trophyDefined: defined,
-				trophyRate: Number(tt.trophyTitleEarnedRate) || 0,
+				trophyRate: Number(tt.progress) || 0,
 				raw: tt
 			};
 		});
