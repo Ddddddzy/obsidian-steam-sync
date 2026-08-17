@@ -610,25 +610,29 @@ class SteamSyncPlugin extends Plugin {
 
 		this.psnAccessToken = token;
 		this.psnAccountId = decodeJwtAccountId(token);
+		console.log('[Steam Sync] PSN accountId:', this.psnAccountId || '(未解码到)');
 
 		const accountId = this.psnAccountId || 'me';
 		const url = `https://m.np.playstation.com/api/gamelist/v2/users/${encodeURIComponent(accountId)}/titles?limit=800`;
+		console.log('[Steam Sync] PSN gamelist URL:', url);
 		let resp;
 		try {
-			resp = await requestUrl({
-				url,
+			resp = await fetch(url, {
 				method: 'GET',
 				headers: {
-					Authorization: `Bearer ${token}`
+					Authorization: `Bearer ${token}`,
+					Accept: 'application/json'
 				}
 			});
 		} catch (e) {
-			throw new Error(`PSN 游戏列表请求失败（${e.message || e}）。Token 可能已过期，请重新从浏览器 F12 Network 复制 Access Token`);
+			console.error('[Steam Sync] PSN gamelist 请求异常', e);
+			throw new Error(`PSN 游戏列表请求失败（${e.message || e}）`);
 		}
 		if (resp.status < 200 || resp.status >= 300) {
-			throw new Error(`PSN 游戏列表返回 HTTP ${resp.status}：${String(resp.text || '').slice(0, 200)}`);
+			const text = await resp.text().catch(() => '');
+			throw new Error(`PSN 游戏列表返回 HTTP ${resp.status}：${text.slice(0, 300)}`);
 		}
-		const json = resp.json;
+		const json = await resp.json();
 		const titles = (json && Array.isArray(json.titles)) ? json.titles : (json && Array.isArray(json.data) ? json.data : []);
 
 		const trophyMap = this.psnAccountId ? await this.fetchPsnTrophyTitles(this.psnAccountId, token) : new Map();
@@ -665,15 +669,16 @@ class SteamSyncPlugin extends Plugin {
 		const map = new Map();
 		try {
 			const url = `https://m.np.playstation.com/api/trophy/v1/users/${encodeURIComponent(accountId)}/trophyTitles?limit=800`;
-			const resp = await requestUrl({
-				url,
+			const resp = await fetch(url, {
 				method: 'GET',
 				headers: {
-					Authorization: `Bearer ${token}`
+					Authorization: `Bearer ${token}`,
+					Accept: 'application/json'
 				}
 			});
 			if (resp.status < 200 || resp.status >= 300) return map;
-			const list = (resp.json && Array.isArray(resp.json.trophyTitles)) ? resp.json.trophyTitles : [];
+			const json = await resp.json();
+			const list = (json && Array.isArray(json.trophyTitles)) ? json.trophyTitles : [];
 			for (const tt of list) {
 				map.set(normalizeName(tt.trophyTitleName), tt);
 			}
@@ -687,20 +692,18 @@ class SteamSyncPlugin extends Plugin {
 		const empty = { available: false, reason: 'none', unlocked: 0, total: 0, items: [] };
 		if (!accountId || !npCommunicationId) return empty;
 		try {
-			const headers = { Authorization: `Bearer ${token}` };
-			const defResp = await requestUrl({
-				url: `https://m.np.playstation.com/api/trophy/v1/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`,
-				method: 'GET',
-				headers
-			});
-			const defs = (defResp.status >= 200 && defResp.status < 300 && defResp.json && Array.isArray(defResp.json.trophies)) ? defResp.json.trophies : [];
+			const headers = { Authorization: `Bearer ${token}`, Accept: 'application/json' };
+			const defResp = await fetch(
+				`https://m.np.playstation.com/api/trophy/v1/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`,
+				{ method: 'GET', headers }
+			);
+			const defs = (defResp.status >= 200 && defResp.status < 300) ? ((await defResp.json().catch(() => ({}))).trophies || []) : [];
 
-			const earnedResp = await requestUrl({
-				url: `https://m.np.playstation.com/api/trophy/v1/users/${encodeURIComponent(accountId)}/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`,
-				method: 'GET',
-				headers
-			});
-			const earnedList = (earnedResp.status >= 200 && earnedResp.status < 300 && earnedResp.json && Array.isArray(earnedResp.json.trophies)) ? earnedResp.json.trophies : [];
+			const earnedResp = await fetch(
+				`https://m.np.playstation.com/api/trophy/v1/users/${encodeURIComponent(accountId)}/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`,
+				{ method: 'GET', headers }
+			);
+			const earnedList = (earnedResp.status >= 200 && earnedResp.status < 300) ? ((await earnedResp.json().catch(() => ({}))).trophies || []) : [];
 
 			const earnedById = new Map();
 			for (const e of earnedList) earnedById.set(String(e.trophyId), e);
