@@ -612,16 +612,20 @@ class SteamSyncPlugin extends Plugin {
 		this.psnAccountId = decodeJwtAccountId(token);
 
 		const url = 'https://m.np.playstation.com/api/gamelist/v2/users/me/titles?limit=800';
-		const resp = await requestUrl({
-			url,
-			method: 'GET',
-			headers: {
-				Authorization: `Bearer ${token}`,
-				'Accept-Language': 'zh-Hans'
-			}
-		});
+		let resp;
+		try {
+			resp = await requestUrl({
+				url,
+				method: 'GET',
+				headers: {
+					Authorization: `Bearer ${token}`
+				}
+			});
+		} catch (e) {
+			throw new Error(`PSN 游戏列表请求失败（${e.message || e}）。Token 可能已过期，请重新从浏览器 F12 Network 复制 Access Token`);
+		}
 		if (resp.status < 200 || resp.status >= 300) {
-			throw new Error(`PSN API 返回 HTTP ${resp.status}`);
+			throw new Error(`PSN 游戏列表返回 HTTP ${resp.status}：${String(resp.text || '').slice(0, 200)}`);
 		}
 		const json = resp.json;
 		const titles = (json && Array.isArray(json.titles)) ? json.titles : (json && Array.isArray(json.data) ? json.data : []);
@@ -664,8 +668,7 @@ class SteamSyncPlugin extends Plugin {
 				url,
 				method: 'GET',
 				headers: {
-					Authorization: `Bearer ${token}`,
-					'Accept-Language': 'zh-Hans'
+					Authorization: `Bearer ${token}`
 				}
 			});
 			if (resp.status < 200 || resp.status >= 300) return map;
