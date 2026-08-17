@@ -576,6 +576,16 @@ class SteamSyncPlugin extends Plugin {
 		throw new Error(`未知平台：${platform}`);
 	}
 
+	psnHeaders(token) {
+		return {
+			Authorization: `Bearer ${token}`,
+			Accept: 'application/json',
+			'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Mobile Safari/537.36',
+			'Accept-Language': 'en-US,en;q=0.9',
+			Country: 'US'
+		};
+	}
+
 	async fetchPsnGames() {
 		const token = String(this.settings.psnAccessToken || '').trim();
 		if (!token) throw new Error('请先在设置中填写 PSN Access Token');
@@ -590,17 +600,17 @@ class SteamSyncPlugin extends Plugin {
 				resp = await requestUrl({
 					url,
 					method: 'GET',
-					headers: {
-						Authorization: `Bearer ${token}`,
-						Accept: 'application/json'
-					},
+					headers: this.psnHeaders(token),
 					throw: false
 				});
 			} catch (e) {
 				console.error('[Steam Sync] PSN gamelist 网络异常', e);
 				throw new Error(`PSN 游戏列表网络异常（${e.message || e}）`);
 			}
-			if (resp.status === 401) throw new Error('PSN Access Token 无效或已过期，请重新获取并填写');
+			if (resp.status === 401) {
+				const body = String(resp.text || '').slice(0, 300);
+				throw new Error(`PSN Access Token 无效或已过期（401），请重新获取并填写${body ? `。服务端：${body}` : ''}`);
+			}
 			if (resp.status === 403) throw new Error('PSN 请求被拒绝（403），可能需要检查 Token 权限或 PSN 隐私设置');
 			if (resp.status === 429) throw new Error('PSN 请求过于频繁（429），请稍后再试');
 			if (resp.status < 200 || resp.status >= 300) {
@@ -657,10 +667,7 @@ class SteamSyncPlugin extends Plugin {
 				const resp = await requestUrl({
 					url,
 					method: 'GET',
-					headers: {
-						Authorization: `Bearer ${token}`,
-						Accept: 'application/json'
-					},
+					headers: this.psnHeaders(token),
 					throw: false
 				});
 				if (resp.status < 200 || resp.status >= 300) break;
@@ -683,7 +690,7 @@ class SteamSyncPlugin extends Plugin {
 		const empty = { available: false, reason: 'none', unlocked: 0, total: 0, items: [] };
 		if (!npCommunicationId) return empty;
 		try {
-			const headers = { Authorization: `Bearer ${token}`, Accept: 'application/json' };
+			const headers = this.psnHeaders(token);
 			const defResp = await requestUrl({
 				url: `https://m.np.playstation.com/api/trophy/v1/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`,
 				method: 'GET',
