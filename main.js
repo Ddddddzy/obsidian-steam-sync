@@ -696,7 +696,7 @@ class SteamSyncPlugin extends Plugin {
 		}
 		const json = resp.json;
 		const titles = (json && Array.isArray(json.titles)) ? json.titles : [];
-		return titles.map((t, idx) => {
+		const games = titles.map((t, idx) => {
 			const history = t.titleHistory || {};
 			const images = Array.isArray(t.images) ? t.images : [];
 			const cover = firstDefined(
@@ -723,6 +723,14 @@ class SteamSyncPlugin extends Plugin {
 				raw: t
 			};
 		});
+
+		// titlehub 不返回时长，逐游戏从 userstats 补取
+		for (let i = 0; i < games.length; i++) {
+			const g = games[i];
+			if (g.scid) g.playtime_forever = await this.fetchXboxMinutesPlayed(xuid, g.scid);
+			if (i < games.length - 1) await sleep(80);
+		}
+		return games;
 	}
 
 	async fetchXboxXuid(baseHeaders) {
@@ -1007,8 +1015,6 @@ class SteamSyncPlugin extends Plugin {
 		let ach = null;
 		if (platform === 'xbox') {
 			const xuid = await this.getXboxXuid(this.getXboxAuthHeaders());
-			const minutes = await this.fetchXboxMinutesPlayed(xuid, game.scid);
-			if (minutes > 0) updates.时长 = formatPlaytime(minutes);
 			if (this.settings.syncAchievements) {
 				ach = await this.fetchXboxAchievements(xuid, game.id, game.scid);
 				if (ach.available) updates.成就 = `${ach.unlocked}/${ach.total}`;
@@ -1041,8 +1047,6 @@ class SteamSyncPlugin extends Plugin {
 		let achievement_list = '';
 		if (platform === 'xbox') {
 			const xuid = await this.getXboxXuid(this.getXboxAuthHeaders());
-			const played = await this.fetchXboxMinutesPlayed(xuid, game.scid);
-			if (played > 0) minutes = played;
 			if (this.settings.syncAchievements) {
 				const ach = await this.fetchXboxAchievements(xuid, game.id, game.scid);
 				achievements = ach.available ? `${ach.unlocked}/${ach.total}` : (game.achievements || '无');
