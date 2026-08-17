@@ -47,6 +47,7 @@ const DEFAULT_SETTINGS = {
 	platformAppidMap: {},
 	psnAccessToken: '',
 	psnRefreshToken: '',
+	psnTokenUpdatedAt: 0,
 	psnDataSource: 'gamelist',
 	xboxAuthorization: '',
 	xboxXuid: '',
@@ -609,16 +610,15 @@ class SteamSyncPlugin extends Plugin {
 		};
 	}
 
-	isPsnTokenExpired(resp) {
-		let json = resp && resp.json;
-		if (!json) {
-			try { json = JSON.parse(String(resp && resp.text || '')); } catch (e) { json = null; }
-		}
-		const err = json && json.error;
-		return !!(err && (err.code === 1572996 || err.reason === 'expiredToken' || /expired jwt token/i.test(String(err.message || ''))));
+	async tryRefreshPsnToken() {
+		if (this._psnRefreshPromise) return this._psnRefreshPromise;
+		this._psnRefreshPromise = this._doRefreshPsnToken().finally(() => {
+			this._psnRefreshPromise = null;
+		});
+		return this._psnRefreshPromise;
 	}
 
-	async tryRefreshPsnToken() {
+	async _doRefreshPsnToken() {
 		const refreshToken = String(this.settings.psnRefreshToken || '').trim();
 		if (!refreshToken) return '';
 		try {
@@ -639,10 +639,16 @@ class SteamSyncPlugin extends Plugin {
 				if (json.refresh_token) {
 					this.settings.psnRefreshToken = String(json.refresh_token).trim();
 				}
+				this.settings.psnTokenUpdatedAt = Date.now();
 				await this.saveSettings();
 				return newToken;
 			}
-			console.warn('[Steam Sync] PSN 刷新令牌失效', resp.status, String(json.error_description || json.error || ''));
+			const err = String(json.error_description || json.error || '');
+			if (/invalid_grant|expired|invalid_token|revoked/i.test(err)) {
+				this.settings.psnRefreshToken = '';
+				await this.saveSettings();
+			}
+			console.warn('[Steam Sync] PSN 刷新令牌失效', resp.status, err);
 			return '';
 		} catch (e) {
 			console.warn('[Steam Sync] PSN 自动刷新异常', e.message || e);
@@ -651,6 +657,10 @@ class SteamSyncPlugin extends Plugin {
 	}
 
 	async psnGet(url) {
+		const PREEMPT_MS = 45 * 60 * 1000;
+		if (this.settings.psnTokenUpdatedAt && Date.now() - this.settings.psnTokenUpdatedAt > PREEMPT_MS) {
+			await this.tryRefreshPsnToken();
+		}
 		let token = String(this.settings.psnAccessToken || '').trim();
 		let resp = await requestUrl({
 			url,
@@ -658,7 +668,7 @@ class SteamSyncPlugin extends Plugin {
 			headers: this.psnHeaders(token),
 			throw: false
 		});
-		if (resp.status === 401 && this.isPsnTokenExpired(resp)) {
+		if (resp.status === 401) {
 			const newToken = await this.tryRefreshPsnToken();
 			if (newToken) {
 				resp = await requestUrl({
