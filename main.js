@@ -615,6 +615,9 @@ class SteamSyncPlugin extends Plugin {
 			if (resp.status >= 200 && resp.status < 300 && json.access_token) {
 				const newToken = String(json.access_token).trim();
 				this.settings.psnAccessToken = newToken;
+				if (json.refresh_token) {
+					this.settings.psnRefreshToken = String(json.refresh_token).trim();
+				}
 				await this.saveSettings();
 				return newToken;
 			}
