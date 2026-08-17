@@ -52,7 +52,8 @@ const DEFAULT_SETTINGS = {
 	xboxAuthorization: '',
 	xboxXuid: '',
 	epicAccessToken: '',
-	epicManifestPath: 'C:/ProgramData/Epic/EpicGamesLauncher/Data/Manifests'
+	epicManifestPath: 'C:/ProgramData/Epic/EpicGamesLauncher/Data/Manifests',
+	epicDataSource: 'online',
 };
 
 function sanitizeFileName(name) {
@@ -1115,9 +1116,12 @@ getXboxAuthHeaders() {
 	}
 
 	async fetchEpicGames() {
+		if (this.settings.epicDataSource === 'local') {
+			return this.scanEpicLibraryGames();
+		}
 		const token = String(this.settings.epicAccessToken || '').trim();
 		if (!token) {
-			// 没有 token 时退回本地清单，只读取已安装游戏
+			new Notice('未填写 Epic Access Token，退回本地清单模式（仅已安装游戏）');
 			return this.scanEpicLibraryGames();
 		}
 
@@ -1204,7 +1208,7 @@ getXboxAuthHeaders() {
 	scanEpicLibraryGames() {
 		const map = this.scanEpicLibrary();
 		if (!map.size) {
-			throw new Error('未填写 Epic Access Token，且无法读取 Epic 本地清单目录：' + String(this.settings.epicManifestPath || '').trim());
+			throw new Error('无法读取 Epic 本地清单目录：' + String(this.settings.epicManifestPath || '').trim());
 		}
 		const games = [];
 		for (const [id, info] of map.entries()) {
@@ -2255,6 +2259,20 @@ class SteamSyncSettingTab extends PluginSettingTab {
 		containerEl.createEl('p', {
 			text: '可填 Epic Access Token 读取完整游戏库；不填则只读取本地 Epic 清单中的已安装游戏。'
 		});
+
+		new Setting(containerEl)
+			.setName('Epic 数据来源')
+			.setDesc('在线游戏库：使用 Epic 游戏库 API 获取全部拥有的游戏（需 Access Token）。本地清单：读取 Epic 启动器清单目录中的已安装游戏（无需 Token）。切换后点击同步即可。')
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOption('online', '在线游戏库')
+					.addOption('local', '本地清单（已安装）')
+					.setValue(this.plugin.settings.epicDataSource || 'online')
+					.onChange(async (value) => {
+						this.plugin.settings.epicDataSource = value;
+						await this.plugin.saveSettings();
+					});
+			});
 
 		new Setting(containerEl)
 			.setName('Epic Access Token')

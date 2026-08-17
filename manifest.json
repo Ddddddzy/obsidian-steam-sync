@@ -1,7 +1,7 @@
 {
 	"id": "obsidian-steam-sync",
 	"name": "Steam Sync",
-	"version": "1.9.6",
+	"version": "1.9.7",
 	"minAppVersion": "1.4.0",
 	"description": "获取 Steam 游戏数据，按资源模板创建笔记，同步游玩时长与成就；实验性支持 PSN、Xbox、Epic 游戏库读取。",
 	"author": "Steam Sync",
