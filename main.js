@@ -46,6 +46,7 @@ const DEFAULT_SETTINGS = {
 	appidMap: {},
 	platformAppidMap: {},
 	psnAccessToken: '',
+	psnRefreshToken: '',
 	xboxAuthorization: '',
 	xboxXuid: '',
 	epicAccessToken: '',
@@ -467,7 +468,7 @@ class SteamSyncPlugin extends Plugin {
 				appidKey: 'psn_appid',
 				sourceLabel: 'PSN',
 				hasListPlaytime: true,
-				notice: '请先在设置中填写 PSN Access Token'
+				notice: '请先在设置中填写 PSN Access Token（推荐同时填写 Refresh Token）'
 			},
 			xbox: {
 				label: 'Xbox',
@@ -586,9 +587,68 @@ class SteamSyncPlugin extends Plugin {
 		};
 	}
 
+	isPsnTokenExpired(resp) {
+		let json = resp && resp.json;
+		if (!json) {
+			try { json = JSON.parse(String(resp && resp.text || '')); } catch (e) { json = null; }
+		}
+		const err = json && json.error;
+		return !!(err && (err.code === 1572996 || err.reason === 'expiredToken' || /expired jwt token/i.test(String(err.message || ''))));
+	}
+
+	async tryRefreshPsnToken() {
+		const refreshToken = String(this.settings.psnRefreshToken || '').trim();
+		if (!refreshToken) return '';
+		try {
+			const resp = await requestUrl({
+				url: 'https://ca.account.sony.com/api/authz/v3/oauth/token',
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/x-www-form-urlencoded',
+					Authorization: 'Basic MDk1MTUxNTktNzIzNy00MzcwLTliNDAtMzgwNmU2N2MwODkxOnVjUGprYTV0bnRCMktxc1A='
+				},
+				body: `grant_type=refresh_token&token_format=jwt&scope=${encodeURIComponent('psn:mobile.v1 psn:clientapp')}&refresh_token=${encodeURIComponent(refreshToken)}`,
+				throw: false
+			});
+			const json = resp.json || {};
+			if (resp.status >= 200 && resp.status < 300 && json.access_token) {
+				const newToken = String(json.access_token).trim();
+				this.settings.psnAccessToken = newToken;
+				await this.saveSettings();
+				return newToken;
+			}
+			console.warn('[Steam Sync] PSN 刷新令牌失效', resp.status, String(json.error_description || json.error || ''));
+			return '';
+		} catch (e) {
+			console.warn('[Steam Sync] PSN 自动刷新异常', e.message || e);
+			return '';
+		}
+	}
+
+	async psnGet(url) {
+		let token = String(this.settings.psnAccessToken || '').trim();
+		let resp = await requestUrl({
+			url,
+			method: 'GET',
+			headers: this.psnHeaders(token),
+			throw: false
+		});
+		if (resp.status === 401 && this.isPsnTokenExpired(resp)) {
+			const newToken = await this.tryRefreshPsnToken();
+			if (newToken) {
+				resp = await requestUrl({
+					url,
+					method: 'GET',
+					headers: this.psnHeaders(newToken),
+					throw: false
+				});
+			}
+		}
+		return resp;
+	}
+
 	async fetchPsnGames() {
-		const token = String(this.settings.psnAccessToken || '').trim();
-		if (!token) throw new Error('请先在设置中填写 PSN Access Token');
+		if (!String(this.settings.psnAccessToken || '').trim()) throw new Error('请先在设置中填写 PSN Access Token');
 
 		let allTitles = [];
 		let offset = 0;
@@ -597,19 +657,16 @@ class SteamSyncPlugin extends Plugin {
 			const url = `https://m.np.playstation.com/api/gamelist/v2/users/me/titles?limit=${limit}&offset=${offset}`;
 			let resp;
 			try {
-				resp = await requestUrl({
-					url,
-					method: 'GET',
-					headers: this.psnHeaders(token),
-					throw: false
-				});
+				resp = await this.psnGet(url);
 			} catch (e) {
 				console.error('[Steam Sync] PSN gamelist 网络异常', e);
 				throw new Error(`PSN 游戏列表网络异常（${e.message || e}）`);
 			}
 			if (resp.status === 401) {
-				const body = String(resp.text || '').slice(0, 300);
-				throw new Error(`PSN Access Token 无效或已过期（401），请重新获取并填写${body ? `。服务端：${body}` : ''}`);
+				const hasRefresh = !!(String(this.settings.psnRefreshToken || '').trim());
+				throw new Error(hasRefresh
+					? 'PSN 认证失败：Access Token 与 Refresh Token 均无效，请重新通过 psn-api 获取并填写'
+					: 'PSN Access Token 无效或已过期（401），请在设置中填写 Refresh Token 以便自动刷新，或重新获取 Access Token');
 			}
 			if (resp.status === 403) throw new Error('PSN 请求被拒绝（403），可能需要检查 Token 权限或 PSN 隐私设置');
 			if (resp.status === 429) throw new Error('PSN 请求过于频繁（429），请稍后再试');
@@ -627,7 +684,7 @@ class SteamSyncPlugin extends Plugin {
 			await sleep(80);
 		}
 
-		const trophyMap = this.settings.syncAchievements ? await this.fetchPsnTrophyTitles(token) : new Map();
+		const trophyMap = this.settings.syncAchievements ? await this.fetchPsnTrophyTitles() : new Map();
 
 		return allTitles.map((t, idx) => {
 			const cover = firstDefined(t.imageUrl, t.localizedImageUrl, t.conceptIconUrl, t.coverUrl, '');
@@ -657,19 +714,14 @@ class SteamSyncPlugin extends Plugin {
 		});
 	}
 
-	async fetchPsnTrophyTitles(token) {
+	async fetchPsnTrophyTitles() {
 		const map = new Map();
 		try {
 			let offset = 0;
 			const limit = 800;
 			while (true) {
 				const url = `https://m.np.playstation.com/api/trophy/v1/users/me/trophyTitles?limit=${limit}&offset=${offset}`;
-				const resp = await requestUrl({
-					url,
-					method: 'GET',
-					headers: this.psnHeaders(token),
-					throw: false
-				});
+				const resp = await this.psnGet(url);
 				if (resp.status < 200 || resp.status >= 300) break;
 				const list = (resp.json && Array.isArray(resp.json.trophyTitles)) ? resp.json.trophyTitles : [];
 				for (const tt of list) {
@@ -686,25 +738,14 @@ class SteamSyncPlugin extends Plugin {
 		return map;
 	}
 
-	async fetchPsnTrophies(npCommunicationId, token) {
+	async fetchPsnTrophies(npCommunicationId) {
 		const empty = { available: false, reason: 'none', unlocked: 0, total: 0, items: [] };
 		if (!npCommunicationId) return empty;
 		try {
-			const headers = this.psnHeaders(token);
-			const defResp = await requestUrl({
-				url: `https://m.np.playstation.com/api/trophy/v1/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`,
-				method: 'GET',
-				headers,
-				throw: false
-			});
+			const defResp = await this.psnGet(`https://m.np.playstation.com/api/trophy/v1/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`);
 			const defs = (defResp.status >= 200 && defResp.status < 300 && defResp.json && Array.isArray(defResp.json.trophies)) ? defResp.json.trophies : [];
 
-			const earnedResp = await requestUrl({
-				url: `https://m.np.playstation.com/api/trophy/v1/users/me/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`,
-				method: 'GET',
-				headers,
-				throw: false
-			});
+			const earnedResp = await this.psnGet(`https://m.np.playstation.com/api/trophy/v1/users/me/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`);
 			const earnedList = (earnedResp.status >= 200 && earnedResp.status < 300 && earnedResp.json && Array.isArray(earnedResp.json.trophies)) ? earnedResp.json.trophies : [];
 
 			const earnedById = new Map();
@@ -1109,7 +1150,7 @@ getXboxAuthHeaders() {
 			}
 		} else if (platform === 'psn') {
 			if (this.settings.syncAchievements) {
-				ach = await this.fetchPsnTrophies(game.npCommunicationId, String(this.settings.psnAccessToken || ''));
+				ach = await this.fetchPsnTrophies(game.npCommunicationId);
 				showPercent = true;
 			}
 		}
@@ -1154,7 +1195,7 @@ getXboxAuthHeaders() {
 			}
 		} else if (platform === 'psn') {
 			if (this.settings.syncAchievements) {
-				const ach = await this.fetchPsnTrophies(game.npCommunicationId, String(this.settings.psnAccessToken || ''));
+				const ach = await this.fetchPsnTrophies(game.npCommunicationId);
 				achievements = ach.available ? `${ach.unlocked}/${ach.total}` : (game.achievements || '无');
 				if (this.settings.writeAchievementList && ach.available) {
 					achievement_list = formatAchievementList(ach, this.settings.includeLockedAchievements, true);
@@ -1982,7 +2023,7 @@ class SteamSyncSettingTab extends PluginSettingTab {
 
 		containerEl.createEl('h3', { text: 'PSN（实验性）' });
 		containerEl.createEl('p', {
-			text: '需要 PSN Access Token。可用 psn-api（Node.js）或 psnawp（Python）登录后获取。'
+			text: '需要 PSN Access Token，推荐同时填写 Refresh Token（psn-api 登录后返回的 refreshToken，有效期约 2 个月）。Access Token 过期时插件会自动用 Refresh Token 刷新，无需每次手动重新获取。'
 		});
 
 		new Setting(containerEl)
@@ -1993,6 +2034,19 @@ class SteamSyncSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.psnAccessToken)
 					.onChange(async (value) => {
 						this.plugin.settings.psnAccessToken = value.trim();
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.type = 'password';
+			});
+
+		new Setting(containerEl)
+			.setName('PSN Refresh Token')
+			.setDesc('可选：psn-api 返回的 refreshToken。Access Token 过期时自动刷新，避免反复手动获取')
+			.addText((text) => {
+				text.setPlaceholder('可选')
+					.setValue(this.plugin.settings.psnRefreshToken)
+					.onChange(async (value) => {
+						this.plugin.settings.psnRefreshToken = value.trim();
 						await this.plugin.saveSettings();
 					});
 				text.inputEl.type = 'password';
