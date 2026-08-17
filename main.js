@@ -47,6 +47,7 @@ const DEFAULT_SETTINGS = {
 	platformAppidMap: {},
 	psnAccessToken: '',
 	psnRefreshToken: '',
+	psnDataSource: 'gamelist',
 	xboxAuthorization: '',
 	xboxXuid: '',
 	epicAccessToken: '',
@@ -648,6 +649,11 @@ class SteamSyncPlugin extends Plugin {
 	}
 
 	async fetchPsnGames() {
+		if (this.settings.psnDataSource === 'trophy') return this.fetchPsnGamesFromTrophy();
+		return this.fetchPsnGamesFromGameList();
+	}
+
+	async fetchPsnGamesFromGameList() {
 		if (!String(this.settings.psnAccessToken || '').trim()) throw new Error('请先在设置中填写 PSN Access Token');
 
 		let allTitles = [];
@@ -710,6 +716,57 @@ class SteamSyncPlugin extends Plugin {
 				thumbnail: cover,
 				achievements,
 				raw: t
+			};
+		});
+	}
+
+	async fetchPsnGamesFromTrophy() {
+		if (!String(this.settings.psnAccessToken || '').trim()) throw new Error('请先在设置中填写 PSN Access Token');
+
+		const all = [];
+		let offset = 0;
+		const limit = 200;
+		while (true) {
+			const url = `https://m.np.playstation.com/api/trophy/v1/users/me/trophyTitles?limit=${limit}&offset=${offset}`;
+			const resp = await this.psnGet(url);
+			if (resp.status === 401) {
+				const hasRefresh = !!(String(this.settings.psnRefreshToken || '').trim());
+				throw new Error(hasRefresh
+					? 'PSN 认证失败：Access Token 与 Refresh Token 均无效，请重新通过 psn-api 获取并填写'
+					: 'PSN Access Token 无效或已过期（401），请在设置中填写 Refresh Token 以便自动刷新，或重新获取 Access Token');
+			}
+			if (resp.status === 403) throw new Error('PSN 请求被拒绝（403），可能需要检查 Token 权限或 PSN 隐私设置');
+			if (resp.status === 429) throw new Error('PSN 请求过于频繁（429），请稍后再试');
+			if (resp.status < 200 || resp.status >= 300) break;
+			const list = (resp.json && Array.isArray(resp.json.trophyTitles)) ? resp.json.trophyTitles : [];
+			all.push(...list);
+			const nextOffset = resp.json && resp.json.nextOffset;
+			if (nextOffset == null || list.length === 0) break;
+			offset = nextOffset;
+			await sleep(80);
+		}
+
+		return all.map((tt, idx) => {
+			const defined = sumTrophyCounts(tt.definedTrophies);
+			const earned = sumTrophyCounts(tt.progressedTrophies);
+			const name = firstDefined(tt.trophyTitleName, tt.titleName, `PSN 游戏 ${idx + 1}`);
+			const cover = firstDefined(tt.trophyTitleIconUrl, tt.defaultTrophyGroupIconUrl, '');
+			return {
+				id: String(tt.npCommunicationId || `psn-trophy-${idx}`),
+				npCommunicationId: String(tt.npCommunicationId || ''),
+				name,
+				psnPlatform: String(tt.trophyTitlePlatform || ''),
+				platform: 'PSN',
+				source: 'PSN',
+				playtime_forever: 0,
+				rtime_last_played: 0,
+				cover,
+				thumbnail: cover,
+				achievements: defined > 0 ? `${earned}/${defined}` : '',
+				trophyEarned: earned,
+				trophyDefined: defined,
+				trophyRate: Number(tt.trophyTitleEarnedRate) || 0,
+				raw: tt
 			};
 		});
 	}
@@ -2025,6 +2082,20 @@ class SteamSyncSettingTab extends PluginSettingTab {
 		containerEl.createEl('p', {
 			text: '需要 PSN Access Token，推荐同时填写 Refresh Token（psn-api 登录后返回的 refreshToken，有效期约 2 个月）。Access Token 过期时插件会自动用 Refresh Token 刷新，无需每次手动重新获取。'
 		});
+
+		new Setting(containerEl)
+			.setName('PSN 数据来源')
+			.setDesc('GameList API：使用 PlayStation 游戏列表 API 获取游戏和游玩数据。Trophy API：使用 PlayStation Trophy API 获取用户 Trophy 游戏和奖杯数据。切换后点击同步即可。')
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOption('gamelist', 'GameList API')
+					.addOption('trophy', 'Trophy API')
+					.setValue(this.plugin.settings.psnDataSource || 'gamelist')
+					.onChange(async (value) => {
+						this.plugin.settings.psnDataSource = value;
+						await this.plugin.saveSettings();
+					});
+			});
 
 		new Setting(containerEl)
 			.setName('PSN Access Token')
