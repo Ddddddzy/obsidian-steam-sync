@@ -1666,7 +1666,7 @@ getXboxAuthHeaders() {
 		return String(appid).trim();
 	}
 
-	async syncGameToFile(game, file, steamId) {
+	async syncGameToFile(game, file, steamId, ach) {
 		const sid = steamId || this.activeSteamId;
 		const updates = {
 			时长: formatPlaytime(game.playtime_forever || 0)
@@ -1675,11 +1675,13 @@ getXboxAuthHeaders() {
 			updates.steam_appid = game.appid;
 		}
 
-		let ach = null;
-		if (this.settings.syncAchievements && sid) {
+		if (this.settings.syncAchievements && sid && !ach) {
 			ach = await this.fetchAchievements(sid, game.appid, game);
-			if (ach.available) updates.成就 = `${ach.unlocked}/${ach.total}`;
-			else if (ach.reason !== 'error' && ach.reason !== 'private') updates.成就 = '无';
+		}
+		if (ach && ach.available) {
+			updates.成就 = `${ach.unlocked}/${ach.total}`;
+		} else if (ach && ach.reason !== 'error' && ach.reason !== 'private') {
+			updates.成就 = '无';
 		}
 
 		await this.updateFrontmatter(file, updates);
@@ -1785,17 +1787,19 @@ getXboxAuthHeaders() {
 
 	async createGameFile(game, details, library, platform) {
 		let ach = null;
-		if (platform && this.settings.syncAchievements) {
+		if (this.settings.syncAchievements) {
 			if (platform === 'psn') {
 				ach = await this.fetchPsnTrophies(game.npCommunicationId, { earned: game.trophyEarned, defined: game.trophyDefined });
 			} else if (platform === 'xbox') {
 				const xuid = await this.getXboxXuid(this.getXboxAuthHeaders());
 				ach = await this.fetchXboxAchievements(xuid, game.id, game.scid);
+			} else if (!platform && this.activeSteamId) {
+				ach = await this.fetchAchievements(this.activeSteamId, game.appid, game);
 			}
 		}
 		const data = platform
 			? await this.buildPlatformTemplateData(platform, game, library, ach)
-			: await this.buildTemplateData(game, details, library);
+			: await this.buildTemplateData(game, details, library, ach);
 		const content = platform
 			? this.renderPlatformTemplate(platform, this.settings.template, data)
 			: this.renderTemplate(this.settings.template, data);
@@ -1821,12 +1825,13 @@ getXboxAuthHeaders() {
 			await this.syncPlatformGameToFile(platform, game, file, ach);
 		} else {
 			this.settings.appidMap[String(game.appid)] = file.path;
+			await this.syncGameToFile(game, file, null, ach);
 		}
 		await this.appendIndexLink(file.basename);
 		return filePath;
 	}
 
-	async buildTemplateData(game, details, library) {
+	async buildTemplateData(game, details, library, ach) {
 		const minutes = game.playtime_forever || 0;
 		const hours = Number((minutes / 60).toFixed(1));
 		const local = library && library.get(String(game.appid));
