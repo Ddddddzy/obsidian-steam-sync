@@ -156,8 +156,9 @@ function firstDefined(...values) {
 	return '';
 }
 
-function formatPlaytime(minutes) {
+function formatPlaytime(minutes, available = true) {
 	const mins = Number(minutes) || 0;
+	if (!available) return '无数据';
 	if (mins <= 0) return '未游玩';
 	const hours = mins / 60;
 	if (hours < 10 && !Number.isInteger(Number(hours.toFixed(1)))) {
@@ -760,6 +761,7 @@ class SteamSyncPlugin extends Plugin {
 			const trophy = idMap.get(titleId);
 			const defined = trophy ? sumTrophyCounts(trophy.definedTrophies) : 0;
 			const earned = trophy ? sumTrophyCounts(trophy.earnedTrophies) : 0;
+			const playDur = firstDefined(t.playDuration, t.playedDuration, t.totalPlayTime, '');
 			return {
 				id: titleId,
 				npCommunicationId: trophy ? String(trophy.npCommunicationId || '') : '',
@@ -767,7 +769,8 @@ class SteamSyncPlugin extends Plugin {
 				psnPlatform: psnCategoryToPlatform(t.category),
 				platform: 'PSN',
 				source: 'PSN',
-				playtime_forever: parseDurationToMinutes(firstDefined(t.playDuration, t.playedDuration, t.totalPlayTime, 0)),
+				playtime_forever: parseDurationToMinutes(playDur),
+				playtime_available: playDur !== '',
 				rtime_last_played: parseIsoDateToTimestamp(firstDefined(t.lastPlayedDateTime, t.lastPlayedDate, '')),
 				cover,
 				thumbnail: cover,
@@ -809,6 +812,7 @@ class SteamSyncPlugin extends Plugin {
 				platform: 'PSN',
 				source: 'PSN',
 				playtime_forever: 0,
+				playtime_available: false,
 				rtime_last_played: 0,
 				cover,
 				thumbnail: cover,
@@ -1254,7 +1258,7 @@ getXboxAuthHeaders() {
 	async syncPlatformGameToFile(platform, game, file, ach) {
 		const config = this.getPlatformConfig(platform);
 		const updates = {
-			时长: formatPlaytime(game.playtime_forever || 0)
+			时长: formatPlaytime(game.playtime_forever || 0, game.playtime_available !== false)
 		};
 
 		let showPercent = false;
@@ -1333,7 +1337,7 @@ getXboxAuthHeaders() {
 			name: game.name,
 			english_name: yamlScalar(game.name),
 			appid: game.id,
-			playtime: formatPlaytime(minutes),
+			playtime: formatPlaytime(minutes, game.playtime_available !== false),
 			playtime_hours: Number((minutes / 60).toFixed(1)),
 			playtime_minutes: minutes,
 			last_played: formatDateFromTimestamp(game.rtime_last_played),
@@ -1837,10 +1841,10 @@ getXboxAuthHeaders() {
 		let achievements = '';
 		let achievement_list = '';
 		if (this.settings.syncAchievements && this.activeSteamId) {
-			const ach = await this.fetchAchievements(this.activeSteamId, game.appid, game);
-			achievements = ach.available ? `${ach.unlocked}/${ach.total}` : '无';
+			const res = ach || await this.fetchAchievements(this.activeSteamId, game.appid, game);
+			achievements = res.available ? `${res.unlocked}/${res.total}` : '无';
 			if (this.settings.writeAchievementList) {
-				achievement_list = formatAchievementList(ach, this.settings.includeLockedAchievements);
+				achievement_list = formatAchievementList(res, this.settings.includeLockedAchievements);
 			}
 		}
 
@@ -1962,7 +1966,7 @@ class GameSelectModal extends Modal {
 
 		for (const game of this.filtered) {
 			const key = this.keyOf(game);
-			const hours = ((game.playtime_forever || 0) / 60).toFixed(1);
+			const hours = game.playtime_available === false ? '无数据' : `${((game.playtime_forever || 0) / 60).toFixed(1)} 小时`;
 			const lastPlayed = formatDateFromTimestamp(game.rtime_last_played);
 			const local = this.library.get(key);
 			const installed = local && local.installed ? '已安装' : '未安装';
@@ -1993,7 +1997,7 @@ class GameSelectModal extends Modal {
 			info.createDiv({ cls: 'steam-sync-name', text: game.name });
 			info.createDiv({
 				cls: 'steam-sync-meta',
-				text: `${hours} 小时 · 最后玩 ${lastPlayed} · ${installed}`
+				text: `${hours} · 最后玩 ${lastPlayed} · ${installed}`
 			});
 		}
 	}
