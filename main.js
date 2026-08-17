@@ -46,7 +46,6 @@ const DEFAULT_SETTINGS = {
 	appidMap: {},
 	platformAppidMap: {},
 	psnAccessToken: '',
-	psnNpsso: '',
 	xboxAuthorization: '',
 	xboxXuid: '',
 	epicAccessToken: '',
@@ -273,26 +272,6 @@ function parseAcf(content) {
 	};
 }
 
-function base64UrlDecode(str) {
-	const b64 = String(str).replace(/-/g, '+').replace(/_/g, '/');
-	const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
-	const bin = atob(padded);
-	const bytes = new Uint8Array(bin.length);
-	for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-	return new TextDecoder('utf-8').decode(bytes);
-}
-
-function decodeJwtAccountId(token) {
-	try {
-		const parts = String(token).split('.');
-		if (parts.length < 2) return '';
-		const payload = JSON.parse(base64UrlDecode(parts[1]));
-		return String(payload.account_id || payload.sub || '');
-	} catch (e) {
-		return '';
-	}
-}
-
 function sumTrophyCounts(obj) {
 	if (!obj || typeof obj !== 'object') return 0;
 	return ['bronze', 'silver', 'gold', 'platinum'].reduce((sum, k) => sum + (Number(obj[k]) || 0), 0);
@@ -488,7 +467,7 @@ class SteamSyncPlugin extends Plugin {
 				appidKey: 'psn_appid',
 				sourceLabel: 'PSN',
 				hasListPlaytime: true,
-				notice: '请先在设置中填写 PSN Access Token（或 NPSSO）'
+				notice: '请先在设置中填写 PSN Access Token'
 			},
 			xbox: {
 				label: 'Xbox',
@@ -508,7 +487,7 @@ class SteamSyncPlugin extends Plugin {
 
 	hasPlatformAuth(platform) {
 		if (platform === 'psn') {
-			return !!(String(this.settings.psnAccessToken || '').trim() || String(this.settings.psnNpsso || '').trim());
+			return !!(String(this.settings.psnAccessToken || '').trim());
 		}
 		if (platform === 'xbox') {
 			return !!(String(this.settings.xboxAuthorization || '').trim());
@@ -598,51 +577,51 @@ class SteamSyncPlugin extends Plugin {
 	}
 
 	async fetchPsnGames() {
-		let token = String(this.settings.psnAccessToken || '').trim();
-		if (!token && String(this.settings.psnNpsso || '').trim()) {
-			token = await this.exchangePsnNpsso(String(this.settings.psnNpsso).trim());
-			if (token) {
-				this.settings.psnAccessToken = token;
-				await this.saveSettings();
+		const token = String(this.settings.psnAccessToken || '').trim();
+		if (!token) throw new Error('请先在设置中填写 PSN Access Token');
+
+		let allTitles = [];
+		let offset = 0;
+		const limit = 800;
+		while (true) {
+			const url = `https://m.np.playstation.com/api/gamelist/v2/users/me/titles?limit=${limit}&offset=${offset}`;
+			let resp;
+			try {
+				resp = await requestUrl({
+					url,
+					method: 'GET',
+					headers: {
+						Authorization: `Bearer ${token}`,
+						Accept: 'application/json'
+					},
+					throw: false
+				});
+			} catch (e) {
+				console.error('[Steam Sync] PSN gamelist 网络异常', e);
+				throw new Error(`PSN 游戏列表网络异常（${e.message || e}）`);
 			}
+			if (resp.status === 401) throw new Error('PSN Access Token 无效或已过期，请重新获取并填写');
+			if (resp.status === 403) throw new Error('PSN 请求被拒绝（403），可能需要检查 Token 权限或 PSN 隐私设置');
+			if (resp.status === 429) throw new Error('PSN 请求过于频繁（429），请稍后再试');
+			if (resp.status < 200 || resp.status >= 300) {
+				const body = resp.text || '';
+				console.error('[Steam Sync] PSN gamelist HTTP', resp.status, body);
+				throw new Error(`PSN 游戏列表返回 HTTP ${resp.status}：${String(body).slice(0, 300)}`);
+			}
+			const json = resp.json;
+			const titles = (json && Array.isArray(json.titles)) ? json.titles : [];
+			allTitles = allTitles.concat(titles);
+			const nextOffset = json && json.nextOffset;
+			if (nextOffset == null || titles.length === 0) break;
+			offset = nextOffset;
+			await sleep(80);
 		}
-		if (!token) throw new Error('请先在设置中填写 PSN Access Token（可用 psn-api / psnawp 获取）');
 
-		this.psnAccessToken = token;
-		this.psnAccountId = decodeJwtAccountId(token);
-		console.log('[Steam Sync] PSN accountId:', this.psnAccountId || '(未解码到)');
+		const trophyMap = this.settings.syncAchievements ? await this.fetchPsnTrophyTitles(token) : new Map();
 
-		const accountId = this.psnAccountId || 'me';
-		const url = `https://m.np.playstation.com/api/gamelist/v2/users/${encodeURIComponent(accountId)}/titles?limit=800`;
-		console.log('[Steam Sync] PSN gamelist URL:', url, 'accountId:', this.psnAccountId);
-		let resp;
-		try {
-			resp = await requestUrl({
-				url,
-				method: 'GET',
-				headers: {
-					Authorization: `Bearer ${token}`,
-					Accept: 'application/json'
-				},
-				throw: false
-			});
-		} catch (e) {
-			console.error('[Steam Sync] PSN gamelist 网络异常', e);
-			throw new Error(`PSN 游戏列表网络异常（${e.message || e}）`);
-		}
-		if (resp.status < 200 || resp.status >= 300) {
-			const body = resp.text || '';
-			console.error('[Steam Sync] PSN gamelist HTTP', resp.status, body);
-			throw new Error(`PSN 游戏列表返回 HTTP ${resp.status}：${String(body).slice(0, 300)}`);
-		}
-		const json = resp.json;
-		const titles = (json && Array.isArray(json.titles)) ? json.titles : (json && Array.isArray(json.data) ? json.data : []);
-
-		const trophyMap = this.psnAccountId ? await this.fetchPsnTrophyTitles(this.psnAccountId, token) : new Map();
-
-		return titles.map((t, idx) => {
-			const cover = firstDefined(t.imageUrl, t.conceptIconUrl, t.coverUrl, '');
-			const name = firstDefined(t.name, t.titleName, t.title, `PSN 游戏 ${idx + 1}`);
+		return allTitles.map((t, idx) => {
+			const cover = firstDefined(t.imageUrl, t.localizedImageUrl, t.conceptIconUrl, t.coverUrl, '');
+			const name = firstDefined(t.name, t.localizedName, t.titleName, t.title, `PSN 游戏 ${idx + 1}`);
 			const trophy = trophyMap.get(normalizeName(name));
 			let achievements = '';
 			let npCommunicationId = '';
@@ -668,23 +647,31 @@ class SteamSyncPlugin extends Plugin {
 		});
 	}
 
-	async fetchPsnTrophyTitles(accountId, token) {
+	async fetchPsnTrophyTitles(token) {
 		const map = new Map();
 		try {
-			const url = `https://m.np.playstation.com/api/trophy/v1/users/${encodeURIComponent(accountId)}/trophyTitles?limit=800`;
-			const resp = await requestUrl({
-				url,
-				method: 'GET',
-				headers: {
-					Authorization: `Bearer ${token}`,
-					Accept: 'application/json'
-				},
-				throw: false
-			});
-			if (resp.status < 200 || resp.status >= 300) return map;
-			const list = (resp.json && Array.isArray(resp.json.trophyTitles)) ? resp.json.trophyTitles : [];
-			for (const tt of list) {
-				map.set(normalizeName(tt.trophyTitleName), tt);
+			let offset = 0;
+			const limit = 800;
+			while (true) {
+				const url = `https://m.np.playstation.com/api/trophy/v1/users/me/trophyTitles?limit=${limit}&offset=${offset}`;
+				const resp = await requestUrl({
+					url,
+					method: 'GET',
+					headers: {
+						Authorization: `Bearer ${token}`,
+						Accept: 'application/json'
+					},
+					throw: false
+				});
+				if (resp.status < 200 || resp.status >= 300) break;
+				const list = (resp.json && Array.isArray(resp.json.trophyTitles)) ? resp.json.trophyTitles : [];
+				for (const tt of list) {
+					map.set(normalizeName(tt.trophyTitleName), tt);
+				}
+				const nextOffset = resp.json && resp.json.nextOffset;
+				if (nextOffset == null || list.length === 0) break;
+				offset = nextOffset;
+				await sleep(80);
 			}
 		} catch (e) {
 			console.warn('[Steam Sync] PSN 奖杯标题获取失败', e);
@@ -692,9 +679,9 @@ class SteamSyncPlugin extends Plugin {
 		return map;
 	}
 
-	async fetchPsnTrophies(accountId, npCommunicationId, token) {
+	async fetchPsnTrophies(npCommunicationId, token) {
 		const empty = { available: false, reason: 'none', unlocked: 0, total: 0, items: [] };
-		if (!accountId || !npCommunicationId) return empty;
+		if (!npCommunicationId) return empty;
 		try {
 			const headers = { Authorization: `Bearer ${token}`, Accept: 'application/json' };
 			const defResp = await requestUrl({
@@ -706,7 +693,7 @@ class SteamSyncPlugin extends Plugin {
 			const defs = (defResp.status >= 200 && defResp.status < 300 && defResp.json && Array.isArray(defResp.json.trophies)) ? defResp.json.trophies : [];
 
 			const earnedResp = await requestUrl({
-				url: `https://m.np.playstation.com/api/trophy/v1/users/${encodeURIComponent(accountId)}/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`,
+				url: `https://m.np.playstation.com/api/trophy/v1/users/me/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`,
 				method: 'GET',
 				headers,
 				throw: false
@@ -744,45 +731,7 @@ class SteamSyncPlugin extends Plugin {
 		}
 	}
 
-	async exchangePsnNpsso(npsso) {
-		try {
-			const clientId = '09515159-7237-4370-9b40-3806e67c0891';
-			const redirectUri = 'com.scee.psxandroid.scecompcall://redirect';
-			const scope = 'psn:mobile.v2.core psn:clientapp';
-			const authorizeUrl = `https://ca.account.sony.com/api/authz/v3/oauth/authorize?access_type=offline&client_id=${encodeURIComponent(clientId)}&response_type=code&scope=${encodeURIComponent(scope)}&redirect_uri=${encodeURIComponent(redirectUri)}`;
-			const authResp = await requestUrl({
-				url: authorizeUrl,
-				method: 'GET',
-				headers: {
-					Cookie: `npsso=${npsso}`
-				}
-			});
-			const headers = authResp.headers || {};
-			const location = typeof headers.get === 'function' ? headers.get('location') : headers.location;
-			if (!location) throw new Error('授权跳转未返回 code（Obsidian requestUrl 可能已跟随跳转）');
-			const code = new URL(location).searchParams.get('code');
-			if (!code) throw new Error('授权跳转中没有 code');
-			const tokenResp = await requestUrl({
-				url: 'https://ca.account.sony.com/api/authz/v3/oauth/token',
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/x-www-form-urlencoded',
-					Authorization: `Basic ${btoa(`${clientId}:ucPjka5tntB2KqsP`)}`
-				},
-				body: `grant_type=authorization_code&code=${encodeURIComponent(code)}&redirect_uri=${encodeURIComponent(redirectUri)}&token_format=jwt`
-			});
-			const json = tokenResp.json;
-			const token = json && (json.access_token || json.id_token);
-			if (token) return String(token);
-			throw new Error('Token 交换失败：' + (json && json.error_description ? json.error_description : JSON.stringify(json)));
-		} catch (e) {
-			console.warn('[Steam Sync] NPSSO 交换失败', e);
-			throw new Error(`NPSSO 交换失败：${e.message || e}。你也可以直接填写 PSN Access Token`);
-		}
-	}
-
-
-	getXboxAuthHeaders() {
+getXboxAuthHeaders() {
 		let auth = String(this.settings.xboxAuthorization || '').trim();
 		if (!auth) throw new Error('请先在设置中填写 Xbox XBL3.0 Authorization');
 		if (!auth.startsWith('XBL3.0')) auth = `XBL3.0 ${auth}`;
@@ -1153,7 +1102,7 @@ class SteamSyncPlugin extends Plugin {
 			}
 		} else if (platform === 'psn') {
 			if (this.settings.syncAchievements) {
-				ach = await this.fetchPsnTrophies(this.psnAccountId, game.npCommunicationId, this.psnAccessToken);
+				ach = await this.fetchPsnTrophies(game.npCommunicationId, String(this.settings.psnAccessToken || ''));
 				showPercent = true;
 			}
 		}
@@ -1198,7 +1147,7 @@ class SteamSyncPlugin extends Plugin {
 			}
 		} else if (platform === 'psn') {
 			if (this.settings.syncAchievements) {
-				const ach = await this.fetchPsnTrophies(this.psnAccountId, game.npCommunicationId, this.psnAccessToken);
+				const ach = await this.fetchPsnTrophies(game.npCommunicationId, String(this.settings.psnAccessToken || ''));
 				achievements = ach.available ? `${ach.unlocked}/${ach.total}` : (game.achievements || '无');
 				if (this.settings.writeAchievementList && ach.available) {
 					achievement_list = formatAchievementList(ach, this.settings.includeLockedAchievements, true);
@@ -2026,7 +1975,7 @@ class SteamSyncSettingTab extends PluginSettingTab {
 
 		containerEl.createEl('h3', { text: 'PSN（实验性）' });
 		containerEl.createEl('p', {
-			text: '需要 PSN Access Token。可用 psn-api（Node.js）或 psnawp（Python）登录后获取。也可填 NPSSO 尝试自动交换（Obsidian 环境可能失败）。'
+			text: '需要 PSN Access Token。可用 psn-api（Node.js）或 psnawp（Python）登录后获取。'
 		});
 
 		new Setting(containerEl)
@@ -2037,19 +1986,6 @@ class SteamSyncSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.psnAccessToken)
 					.onChange(async (value) => {
 						this.plugin.settings.psnAccessToken = value.trim();
-						await this.plugin.saveSettings();
-					});
-				text.inputEl.type = 'password';
-			});
-
-		new Setting(containerEl)
-			.setName('PSN NPSSO')
-			.setDesc('可选：store.playstation.com 登录后的 npsso Cookie。若 Access Token 为空则尝试用它交换')
-			.addText((text) => {
-				text.setPlaceholder('可选')
-					.setValue(this.plugin.settings.psnNpsso)
-					.onChange(async (value) => {
-						this.plugin.settings.psnNpsso = value.trim();
 						await this.plugin.saveSettings();
 					});
 				text.inputEl.type = 'password';
