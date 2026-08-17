@@ -612,7 +612,7 @@ class SteamSyncPlugin extends Plugin {
 		this.psnAccountId = decodeJwtAccountId(token);
 
 		const accountId = this.psnAccountId || 'me';
-		const url = `https://m.np.playstation.com/api/gamelist/v2/users/${encodeURIComponent(accountId)}/titles?limit=800`;
+		const url = `https://m.np.playstation.net/api/gamelist/v2/users/${encodeURIComponent(accountId)}/titles?limit=800`;
 		let resp;
 		try {
 			resp = await requestUrl({
@@ -664,7 +664,7 @@ class SteamSyncPlugin extends Plugin {
 	async fetchPsnTrophyTitles(accountId, token) {
 		const map = new Map();
 		try {
-			const url = `https://m.np.playstation.com/api/trophy/v1/users/${encodeURIComponent(accountId)}/trophyTitles?limit=800`;
+			const url = `https://m.np.playstation.net/api/trophy/v1/users/${encodeURIComponent(accountId)}/trophyTitles?limit=800`;
 			const resp = await requestUrl({
 				url,
 				method: 'GET',
@@ -689,14 +689,14 @@ class SteamSyncPlugin extends Plugin {
 		try {
 			const headers = { Authorization: `Bearer ${token}` };
 			const defResp = await requestUrl({
-				url: `https://m.np.playstation.com/api/trophy/v1/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`,
+				url: `https://m.np.playstation.net/api/trophy/v1/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`,
 				method: 'GET',
 				headers
 			});
 			const defs = (defResp.status >= 200 && defResp.status < 300 && defResp.json && Array.isArray(defResp.json.trophies)) ? defResp.json.trophies : [];
 
 			const earnedResp = await requestUrl({
-				url: `https://m.np.playstation.com/api/trophy/v1/users/${encodeURIComponent(accountId)}/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`,
+				url: `https://m.np.playstation.net/api/trophy/v1/users/${encodeURIComponent(accountId)}/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`,
 				method: 'GET',
 				headers
 			});
