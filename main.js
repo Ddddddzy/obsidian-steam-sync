@@ -652,7 +652,7 @@ class SteamSyncPlugin extends Plugin {
 
 		let allTitles = [];
 		let offset = 0;
-		const limit = 800;
+		const limit = 200;
 		while (true) {
 			const url = `https://m.np.playstation.com/api/gamelist/v2/users/me/titles?limit=${limit}&offset=${offset}`;
 			let resp;
