@@ -1251,24 +1251,23 @@ getXboxAuthHeaders() {
 		return (cache && cache.frontmatter) || {};
 	}
 
-	async syncPlatformGameToFile(platform, game, file) {
+	async syncPlatformGameToFile(platform, game, file, ach) {
 		const config = this.getPlatformConfig(platform);
 		const updates = {
 			时长: formatPlaytime(game.playtime_forever || 0)
 		};
 
-		let ach = null;
 		let showPercent = false;
 		if (platform === 'xbox') {
 			const xuid = await this.getXboxXuid(this.getXboxAuthHeaders());
-			if (this.settings.syncAchievements) {
+			if (this.settings.syncAchievements && !ach) {
 				ach = await this.fetchXboxAchievements(xuid, game.id, game.scid);
 			}
 		} else if (platform === 'psn') {
-			if (this.settings.syncAchievements) {
+			if (this.settings.syncAchievements && !ach) {
 				ach = await this.fetchPsnTrophies(game.npCommunicationId, { earned: game.trophyEarned, defined: game.trophyDefined });
-				showPercent = true;
 			}
+			showPercent = true;
 		}
 
 		if (ach && ach.available) {
@@ -1285,17 +1284,21 @@ getXboxAuthHeaders() {
 		updates[config.appidKey] = game.id;
 		await this.updateFrontmatter(file, updates);
 
-		if (this.settings.writeAchievementList && ach && ach.available && ach.reason === 'ok') {
-			await this.upsertAchievementSection(
-				file,
-				formatAchievementList(ach, this.settings.includeLockedAchievements, showPercent)
-			);
+		if (this.settings.writeAchievementList && ach && ach.available) {
+			if (ach.reason === 'ok') {
+				await this.upsertAchievementSection(
+					file,
+					formatAchievementList(ach, this.settings.includeLockedAchievements, showPercent)
+				);
+			} else if (ach.reason === 'summary') {
+				await this.upsertAchievementSection(file, formatTrophySummaryNote(ach));
+			}
 		}
 
 		this.settings.platformAppidMap[`${platform}:${String(game.id)}`] = file.path;
 	}
 
-	async buildPlatformTemplateData(platform, game, library) {
+	async buildPlatformTemplateData(platform, game, library, ach) {
 		const local = library && game.id ? library.get(String(game.id)) : null;
 		const installed = !!(local && local.installed);
 		const absPath = installed ? local.installPath : '';
@@ -1306,21 +1309,21 @@ getXboxAuthHeaders() {
 		if (platform === 'xbox') {
 			const xuid = await this.getXboxXuid(this.getXboxAuthHeaders());
 			if (this.settings.syncAchievements) {
-				const ach = await this.fetchXboxAchievements(xuid, game.id, game.scid);
-				achievements = ach.available ? `${ach.unlocked}/${ach.total}` : (game.achievements || '无');
-				if (this.settings.writeAchievementList && ach.available) {
-					achievement_list = formatAchievementList(ach, this.settings.includeLockedAchievements, false);
+				const res = ach || await this.fetchXboxAchievements(xuid, game.id, game.scid);
+				achievements = res.available ? `${res.unlocked}/${res.total}` : (game.achievements || '无');
+				if (this.settings.writeAchievementList && res.available) {
+					achievement_list = formatAchievementList(res, this.settings.includeLockedAchievements, false);
 				}
 			}
 		} else if (platform === 'psn') {
 			if (this.settings.syncAchievements) {
-				const ach = await this.fetchPsnTrophies(game.npCommunicationId, { earned: game.trophyEarned, defined: game.trophyDefined });
-				achievements = ach.available ? `${ach.unlocked}/${ach.total}` : (game.achievements || '无');
+				const res = ach || await this.fetchPsnTrophies(game.npCommunicationId, { earned: game.trophyEarned, defined: game.trophyDefined });
+				achievements = res.available ? `${res.unlocked}/${res.total}` : (game.achievements || '无');
 				if (this.settings.writeAchievementList) {
-					if (ach.reason === 'ok') {
-						achievement_list = formatAchievementList(ach, this.settings.includeLockedAchievements, true);
-					} else if (ach.reason === 'summary') {
-						achievement_list = formatTrophySummaryNote(ach);
+					if (res.reason === 'ok') {
+						achievement_list = formatAchievementList(res, this.settings.includeLockedAchievements, true);
+					} else if (res.reason === 'summary') {
+						achievement_list = formatTrophySummaryNote(res);
 					}
 				}
 			}
@@ -1777,8 +1780,17 @@ getXboxAuthHeaders() {
 	}
 
 	async createGameFile(game, details, library, platform) {
+		let ach = null;
+		if (platform && this.settings.syncAchievements) {
+			if (platform === 'psn') {
+				ach = await this.fetchPsnTrophies(game.npCommunicationId, { earned: game.trophyEarned, defined: game.trophyDefined });
+			} else if (platform === 'xbox') {
+				const xuid = await this.getXboxXuid(this.getXboxAuthHeaders());
+				ach = await this.fetchXboxAchievements(xuid, game.id, game.scid);
+			}
+		}
 		const data = platform
-			? await this.buildPlatformTemplateData(platform, game, library)
+			? await this.buildPlatformTemplateData(platform, game, library, ach)
 			: await this.buildTemplateData(game, details, library);
 		const content = platform
 			? this.renderPlatformTemplate(platform, this.settings.template, data)
@@ -1802,6 +1814,7 @@ getXboxAuthHeaders() {
 		const file = await this.app.vault.create(filePath, content);
 		if (platform) {
 			this.settings.platformAppidMap[`${platform}:${String(game.id)}`] = file.path;
+			await this.syncPlatformGameToFile(platform, game, file, ach);
 		} else {
 			this.settings.appidMap[String(game.appid)] = file.path;
 		}
