@@ -214,9 +214,9 @@ function tableCell(value) {
 		.trim();
 }
 
-function formatAchievementList(result, includeLocked) {
+function formatAchievementList(result, includeLocked, showPercent = true) {
 	if (!result || !result.available) {
-		return '该游戏没有 Steam 成就，或统计未公开。';
+		return '该游戏没有成就数据，或统计未公开。';
 	}
 
 	let items = includeLocked
@@ -227,11 +227,18 @@ function formatAchievementList(result, includeLocked) {
 		return (b.unlocktime || 0) - (a.unlocktime || 0);
 	});
 
+	const headerRow = showPercent
+		? '| 图标 | 名字 | 说明 | 时间 | 所有玩家完成百分比 |'
+		: '| 图标 | 名字 | 说明 | 时间 |';
+	const sepRow = showPercent
+		? '| :---: | --- | --- | --- | ---: |'
+		: '| :---: | --- | --- | --- |';
+
 	const lines = [
 		`已解锁 **${result.unlocked}/${result.total}**。`,
 		'',
-		'| 图标 | 名字 | 说明 | 时间 | 所有玩家完成百分比 |',
-		'| :---: | --- | --- | --- | ---: |'
+		headerRow,
+		sepRow
 	];
 
 	if (!items.length) {
@@ -244,12 +251,13 @@ function formatAchievementList(result, includeLocked) {
 		const desc = String(item.description || '').replace(/\s+/g, ' ').trim()
 			|| (!item.unlocked && item.hidden ? '隐藏成就' : '');
 		const icon = item.unlocked ? (item.icon || item.icongray) : (item.icongray || item.icon);
-		const percent = formatPercent(item.percent);
+		const percent = showPercent ? formatPercent(item.percent) : '';
 		const time = item.unlocked && item.unlocktime ? formatUnlockTime(item.unlocktime) : '未解锁';
 		const img = icon
 			? `<img src="${escapeHtml(icon)}" width="48" height="48" alt="${escapeHtml(name)}">`
 			: '';
-		lines.push(`| ${img} | ${tableCell(name)} | ${tableCell(desc)} | ${tableCell(time)} | ${percent ? `${percent}%` : ''} |`);
+		const percentCell = showPercent ? ` | ${percent ? `${percent}%` : ''}` : '';
+		lines.push(`| ${img} | ${tableCell(name)} | ${tableCell(desc)} | ${tableCell(time)}${percentCell} |`);
 	}
 
 	return lines.join('\n');
@@ -507,6 +515,7 @@ class SteamSyncPlugin extends Plugin {
 				if (file) {
 					await this.syncPlatformGameToFile(platform, game, file);
 					syncedCount++;
+					if (platform === 'xbox' && this.settings.syncAchievements) await sleep(150);
 				} else {
 					newGames.push(game);
 				}
@@ -623,34 +632,50 @@ class SteamSyncPlugin extends Plugin {
 		}
 	}
 
-	async fetchXboxGames() {
+
+	getXboxAuthHeaders() {
 		let auth = String(this.settings.xboxAuthorization || '').trim();
 		if (!auth) throw new Error('请先在设置中填写 Xbox XBL3.0 Authorization');
 		if (!auth.startsWith('XBL3.0')) auth = `XBL3.0 ${auth}`;
-
-		const baseHeaders = {
-			Authorization: auth,
-			'Accept-Language': 'zh-Hans'
+		if (!auth.includes(';')) {
+			throw new Error('Xbox Authorization 不完整：应为 XBL3.0 x=你的令牌;你的用户哈希(uhs)。请从浏览器 F12 里完整复制整行 Authorization 值');
+		}
+		return {
+			Authorization: auth
 		};
+	}
 
+	async getXboxXuid(baseHeaders) {
 		let xuid = String(this.settings.xboxXuid || '').trim();
 		if (!xuid) {
 			xuid = await this.fetchXboxXuid(baseHeaders);
 			this.settings.xboxXuid = xuid;
 			await this.saveSettings();
 		}
+		return xuid;
+	}
 
-		const url = `https://titlehub.xboxlive.com/users/xuid(${encodeURIComponent(xuid)})/titles/titlehistory/decoration/achievement,image,scid?maxItems=1000`;
-		const resp = await requestUrl({
-			url,
-			method: 'GET',
-			headers: {
-				...baseHeaders,
-				'x-xbl-contract-version': '2'
-			}
-		});
+	async fetchXboxGames() {
+		const baseHeaders = this.getXboxAuthHeaders();
+		const xuid = await this.getXboxXuid(baseHeaders);
+
+		const url = `https://titlehub.xboxlive.com/users/xuid(${encodeURIComponent(xuid)})/titles/titlehistory/decoration/Scid,image,achievement,stats?maxItems=1000`;
+		let resp;
+		try {
+			resp = await requestUrl({
+				url,
+				method: 'GET',
+				headers: {
+					...baseHeaders,
+					'x-xbl-contract-version': '2',
+					Accept: 'application/json'
+				}
+			});
+		} catch (e) {
+			throw new Error(`Xbox titlehub 请求失败（${url}）：${e.message || e}${e.status ? `，status=${e.status}` : ''}`);
+		}
 		if (resp.status < 200 || resp.status >= 300) {
-			throw new Error(`Xbox API 返回 HTTP ${resp.status}`);
+			throw new Error(`Xbox titlehub API 返回 HTTP ${resp.status}：${String(resp.text || '').slice(0, 300)}`);
 		}
 		const json = resp.json;
 		const titles = (json && Array.isArray(json.titles)) ? json.titles : [];
@@ -663,35 +688,144 @@ class SteamSyncPlugin extends Plugin {
 				null
 			);
 			const coverUrl = cover ? (cover.url || cover.imageUrl || '') : '';
+			const ach = t.achievement || {};
+			const achievements = (ach.currentAchievements != null && ach.totalAchievements != null)
+				? `${ach.currentAchievements}/${ach.totalAchievements}`
+				: '';
+			const titleId = String(firstDefined(t.titleId, t.pfn, `xbox-${idx}`));
+			const scid = String(firstDefined(t.serviceConfigId, t.scid, ''));
+			const titleStatsMap = collectNamedStatValues(t.stats || t, 'MinutesPlayed');
+			const titleMinutes = titleStatsMap.size ? Array.from(titleStatsMap.values())[0] : 0;
 			return {
-				id: String(firstDefined(t.titleId, t.pfn, `xbox-${idx}`)),
+				id: titleId,
+				scid,
 				name: firstDefined(t.name, t.titleName, `Xbox 游戏 ${idx + 1}`),
 				platform: 'Xbox',
 				source: 'Xbox',
-				playtime_forever: parseDurationToMinutes(firstDefined(t.minutesPlayed, t.playtime, history.minutesPlayed, 0)),
+				playtime_forever: parseDurationToMinutes(firstDefined(
+					titleMinutes,
+					t.minutesPlayed,
+					t.playtime,
+					history.minutesPlayed,
+					0
+				)),
 				rtime_last_played: parseIsoDateToTimestamp(firstDefined(history.lastTimePlayed, t.lastTimePlayed, '')),
 				cover: coverUrl,
 				thumbnail: coverUrl,
+				achievements,
 				raw: t
 			};
 		});
 	}
 
 	async fetchXboxXuid(baseHeaders) {
-		const url = 'https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag,GameDisplayPicRaw';
-		const resp = await requestUrl({
-			url,
-			method: 'GET',
-			headers: {
-				...baseHeaders,
-				'x-xbl-contract-version': '3.0'
+		const url = 'https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag';
+		let lastErr = null;
+		for (const contractVersion of ['3.0', '2']) {
+			try {
+				const resp = await requestUrl({
+					url,
+					method: 'GET',
+					headers: {
+						...baseHeaders,
+						'x-xbl-contract-version': contractVersion,
+						Accept: 'application/json'
+					}
+				});
+				if (resp.status < 200 || resp.status >= 300) {
+					lastErr = new Error(`Xbox profile API 返回 HTTP ${resp.status}（contract=${contractVersion}）：${String(resp.text || '').slice(0, 300)}`);
+					continue;
+				}
+				const json = resp.json;
+				const xuid = json && json.profileUsers && json.profileUsers[0] && json.profileUsers[0].id;
+				if (xuid) return String(xuid);
+				lastErr = new Error('profile 响应中没有 xuid');
+			} catch (e) {
+				lastErr = new Error(`Xbox profile 请求失败（${url}，contract=${contractVersion}）：${e.message || e}${e.status ? `，status=${e.status}` : ''}`);
 			}
-		});
-		const json = resp.json;
-		const xuid = json && json.profileUsers && json.profileUsers[0] && json.profileUsers[0].id;
-		if (xuid) return String(xuid);
-		throw new Error('无法获取 Xbox xuid，请在设置中手动填写 xuid');
+		}
+		throw new Error((lastErr && lastErr.message) || `无法获取 Xbox xuid，请在设置中手动填写 xuid`);
 	}
+
+	async fetchXboxAchievements(xuid, titleId, scid) {
+		const empty = { available: false, reason: 'none', unlocked: 0, total: 0, items: [] };
+		if (!xuid || (!titleId && !scid)) return empty;
+
+		const baseHeaders = this.getXboxAuthHeaders();
+
+		const parseItems = (list, defaultUnlocked) => list.map((a) => {
+			const unlocked = defaultUnlocked
+				? true
+				: String(a.progressState || '').toLowerCase() === 'achieved';
+			const media = Array.isArray(a.mediaAssets) ? a.mediaAssets : [];
+			const iconAsset = media.find((m) => m && /icon|achievementimage|image/i.test(m.name || '')) || media[0];
+			return {
+				id: String(a.id || ''),
+				name: a.name || '',
+				description: a.description || '',
+				unlocked,
+				unlocktime: parseIsoDateToTimestamp(a.timeUnlocked || (a.progression && a.progression.timeUnlocked) || ''),
+				icon: (iconAsset && (iconAsset.url || iconAsset.uri)) || '',
+				icongray: '',
+				hidden: !!a.isSecret,
+				percent: 0
+			};
+		});
+
+		const fetchList = async (url) => {
+			try {
+				const resp = await requestUrl({
+					url,
+					method: 'GET',
+					headers: {
+						...baseHeaders,
+						'x-xbl-contract-version': '2',
+						Accept: 'application/json'
+					}
+				});
+				if (resp.status < 200 || resp.status >= 300) {
+					console.warn('[Steam Sync] Xbox 成就接口返回异常', resp.status, String(resp.text || '').slice(0, 300));
+					return [];
+				}
+				const json = resp.json;
+				return (json && Array.isArray(json.achievements)) ? json.achievements : [];
+			} catch (e) {
+				console.warn('[Steam Sync] Xbox 成就接口请求失败', url, e);
+				return [];
+			}
+		};
+
+		let items = [];
+
+		// 1) 用户成就接口：现代游戏优先 scid，旧游戏回退 titleId
+		if (scid) {
+			items = parseItems(await fetchList(`https://achievements.xboxlive.com/users/xuid(${encodeURIComponent(xuid)})/achievements?scid=${encodeURIComponent(scid)}&maxItems=1000`), false);
+		}
+		if (!items.length && titleId) {
+			items = parseItems(await fetchList(`https://achievements.xboxlive.com/users/xuid(${encodeURIComponent(xuid)})/achievements?titleId=${encodeURIComponent(titleId)}&maxItems=1000`), false);
+		}
+
+		// 2) 标题成就定义接口：全量列表，默认未解锁
+		if (!items.length && scid) {
+			items = parseItems(await fetchList(`https://achievements.xboxlive.com/titles/${encodeURIComponent(scid)}/achievements?maxItems=1000`), false);
+		}
+		if (!items.length && titleId) {
+			items = parseItems(await fetchList(`https://achievements.xboxlive.com/titles/${encodeURIComponent(titleId)}/achievements?maxItems=1000`), false);
+		}
+
+		return {
+			available: items.length > 0,
+			reason: items.length > 0 ? 'ok' : 'none',
+			unlocked: items.filter((item) => item.unlocked).length,
+			total: items.length,
+			items
+		};
+	}
+
+
+
+
+
 
 	async fetchEpicGames() {
 		const token = String(this.settings.epicAccessToken || '').trim();
@@ -846,11 +980,35 @@ class SteamSyncPlugin extends Plugin {
 
 	async syncPlatformGameToFile(platform, game, file) {
 		const config = this.getPlatformConfig(platform);
+		let ach = null;
+		let xuid = '';
+
+		if (platform === 'xbox') {
+			xuid = await this.getXboxXuid(this.getXboxAuthHeaders());
+		}
+
 		const updates = {
 			时长: formatPlaytime(game.playtime_forever || 0)
 		};
+
+		if (platform === 'xbox' && this.settings.syncAchievements) {
+			ach = await this.fetchXboxAchievements(xuid, game.id, game.scid);
+			if (ach.available) updates.成就 = `${ach.unlocked}/${ach.total}`;
+			else if (ach.reason === 'none') updates.成就 = game.achievements || '无';
+		} else if (game.achievements) {
+			updates.成就 = game.achievements;
+		}
+
 		updates[config.appidKey] = game.id;
 		await this.updateFrontmatter(file, updates);
+
+		if (platform === 'xbox' && this.settings.writeAchievementList && ach && ach.available) {
+			await this.upsertAchievementSection(
+				file,
+				formatAchievementList(ach, this.settings.includeLockedAchievements, false)
+			);
+		}
+
 		this.settings.platformAppidMap[`${platform}:${String(game.id)}`] = file.path;
 	}
 
@@ -878,7 +1036,7 @@ class SteamSyncPlugin extends Plugin {
 
 	async createPlatformGameFile(platform, game, library) {
 		const config = this.getPlatformConfig(platform);
-		const data = this.buildPlatformTemplateData(platform, game, library);
+		const data = await this.buildPlatformTemplateData(platform, game, library);
 		const template = this.renderPlatformTemplate(platform, this.settings.template, data);
 		const folder = String(this.settings.folder || '').trim();
 		if (folder) await this.ensureFolder(folder);
@@ -902,25 +1060,40 @@ class SteamSyncPlugin extends Plugin {
 		return filePath;
 	}
 
-	buildPlatformTemplateData(platform, game, library) {
+	async buildPlatformTemplateData(platform, game, library) {
 		const local = library && game.id ? library.get(String(game.id)) : null;
 		const installed = !!(local && local.installed);
 		const absPath = installed ? local.installPath : '';
+
+		let minutes = game.playtime_forever || 0;
+		let achievements = game.achievements || '';
+		let achievement_list = '';
+		if (platform === 'xbox') {
+			const xuid = await this.getXboxXuid(this.getXboxAuthHeaders());
+			if (this.settings.syncAchievements) {
+				const ach = await this.fetchXboxAchievements(xuid, game.id, game.scid);
+				achievements = ach.available ? `${ach.unlocked}/${ach.total}` : (game.achievements || '无');
+				if (this.settings.writeAchievementList && ach.available) {
+					achievement_list = formatAchievementList(ach, this.settings.includeLockedAchievements, false);
+				}
+			}
+		}
+
 		return {
 			name: game.name,
 			english_name: yamlScalar(game.name),
 			appid: game.id,
-			playtime: formatPlaytime(game.playtime_forever || 0),
-			playtime_hours: Number(((game.playtime_forever || 0) / 60).toFixed(1)),
-			playtime_minutes: game.playtime_forever || 0,
+			playtime: formatPlaytime(minutes),
+			playtime_hours: Number((minutes / 60).toFixed(1)),
+			playtime_minutes: minutes,
 			last_played: formatDateFromTimestamp(game.rtime_last_played),
 			cover: game.cover || '',
 			status: installed ? '已下载' : '未下载',
 			source: game.source,
 			path: absPath ? yamlString(toFileUrl(absPath)) : '',
 			size: installed ? formatSize(local.sizeOnDisk) : '',
-			achievements: '',
-			achievement_list: '',
+			achievements,
+			achievement_list,
 			date: new Date().toISOString().slice(0, 10)
 		};
 	}

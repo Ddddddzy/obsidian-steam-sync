@@ -18,19 +18,25 @@
 
 ## PSN（实验性）
 
-- 设置：PSN Access Token（可用 `psn-api` / `psnawp` 获取）；也可填 NPSSO 尝试自动交换
+> 不知道 Access Token 怎么拿？看 `如何获取PSN_Xbox_Epic授权.md`，浏览器 F12 就能复制。
+
+- 设置：PSN Access Token（推荐，浏览器 Network 里复制 `Bearer` 后面的值）；也可填 NPSSO 尝试自动交换
 - 命令：`获取 PSN 游戏数据`
 - 读取：游戏列表、最近游玩、封面；`时长` 仅在接口返回时写入，否则为「未游玩」
 - 已有笔记按 `psn_appid` 或「英文名」匹配
 
 ## Xbox（实验性）
 
-- 设置：Xbox XBL3.0 Authorization（可用 OpenXbox/xbox-webapi-python 获取）；xuid 可留空自动获取
+> 不知道 XBL3.0 Authorization 怎么拿？看 `如何获取PSN_Xbox_Epic授权.md`，登录 account.xbox.com 后从 F12 Network 复制。
+
+- 设置：Xbox XBL3.0 Authorization（浏览器 Network 里复制完整 `Authorization` 请求头）；xuid 可留空自动获取
 - 命令：`获取 Xbox 游戏数据`
 - 读取：游戏列表、最近游玩、封面；`时长` 仅在接口返回时写入
 - 已有笔记按 `xbox_appid` 或「英文名」匹配
 
 ## Epic（实验性）
+
+> 不想填 Token？直接留空，插件会读本地 Epic 清单里的已安装游戏。完整库 Token 的获取方式见 `如何获取PSN_Xbox_Epic授权.md`。
 
 - 设置：可填 Epic Access Token 读取完整游戏库；不填则读取本地 `*.item` 清单中的已安装游戏
 - 命令：`获取 Epic 游戏数据`
