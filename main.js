@@ -655,7 +655,7 @@ class SteamSyncPlugin extends Plugin {
 		const baseHeaders = this.getXboxAuthHeaders();
 		const xuid = await this.getXboxXuid(baseHeaders);
 
-		const url = `https://titlehub.xboxlive.com/users/xuid(${encodeURIComponent(xuid)})/titles/titlehistory/decoration/Scid,image,achievement?maxItems=1000`;
+		const url = `https://titlehub.xboxlive.com/users/xuid(${encodeURIComponent(xuid)})/titles/titlehistory/decoration/scid,image,achievement?maxItems=1000`;
 		let resp;
 		try {
 			resp = await requestUrl({
@@ -739,10 +739,8 @@ class SteamSyncPlugin extends Plugin {
 
 		const baseHeaders = this.getXboxAuthHeaders();
 
-		const parseItems = (list, defaultUnlocked) => list.map((a) => {
-			const unlocked = defaultUnlocked
-				? true
-				: String(a.progressState || '').toLowerCase() === 'achieved';
+		const parseItems = (list) => list.map((a) => {
+			const unlocked = String(a.progressState || '').toLowerCase() === 'achieved';
 			const media = Array.isArray(a.mediaAssets) ? a.mediaAssets : [];
 			const iconAsset = media.find((m) => m && /icon|achievementimage|image/i.test(m.name || '')) || media[0];
 			return {
@@ -783,20 +781,14 @@ class SteamSyncPlugin extends Plugin {
 
 		let items = [];
 
-		// 1) 用户成就接口：现代游戏优先 scid，旧游戏回退 titleId
-		if (scid) {
-			items = parseItems(await fetchList(`https://achievements.xboxlive.com/users/xuid(${encodeURIComponent(xuid)})/achievements?scid=${encodeURIComponent(scid)}&maxItems=1000`), false);
-		}
-		if (!items.length && titleId) {
-			items = parseItems(await fetchList(`https://achievements.xboxlive.com/users/xuid(${encodeURIComponent(xuid)})/achievements?titleId=${encodeURIComponent(titleId)}&maxItems=1000`), false);
+		// 1) 用户成就接口：按十进制 titleId 查询
+		if (titleId) {
+			items = parseItems(await fetchList(`https://achievements.xboxlive.com/users/xuid(${encodeURIComponent(xuid)})/achievements?titleId=${encodeURIComponent(titleId)}&maxItems=1000`));
 		}
 
-		// 2) 标题成就定义接口：全量列表，默认未解锁
-		if (!items.length && scid) {
-			items = parseItems(await fetchList(`https://achievements.xboxlive.com/titles/${encodeURIComponent(scid)}/achievements?maxItems=1000`), false);
-		}
+		// 2) 标题成就定义接口：全量列表（含未解锁）
 		if (!items.length && titleId) {
-			items = parseItems(await fetchList(`https://achievements.xboxlive.com/titles/${encodeURIComponent(titleId)}/achievements?maxItems=1000`), false);
+			items = parseItems(await fetchList(`https://achievements.xboxlive.com/titles/${encodeURIComponent(titleId)}/achievements?maxItems=1000`));
 		}
 
 		return {
