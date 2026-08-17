@@ -611,7 +611,8 @@ class SteamSyncPlugin extends Plugin {
 		this.psnAccessToken = token;
 		this.psnAccountId = decodeJwtAccountId(token);
 
-		const url = 'https://m.np.playstation.com/api/gamelist/v2/users/me/titles?limit=800';
+		const accountId = this.psnAccountId || 'me';
+		const url = `https://m.np.playstation.com/api/gamelist/v2/users/${encodeURIComponent(accountId)}/titles?limit=800`;
 		let resp;
 		try {
 			resp = await requestUrl({
