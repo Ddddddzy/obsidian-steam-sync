@@ -204,6 +204,10 @@ function namesMatch(a, b) {
 	return na.length > 0 && na === nb;
 }
 
+function formatTrophySummaryNote(ach) {
+	return `已解锁 **${ach.unlocked}/${ach.total}**。\n\n> 该平台奖杯明细接口不可用，仅同步完成度（常见于 PSV / PS3 等历史平台）。`;
+}
+
 function tableCell(value) {
 	return String(value || '')
 		.replace(/\s+/g, ' ')
@@ -277,6 +281,22 @@ function parseAcf(content) {
 function sumTrophyCounts(obj) {
 	if (!obj || typeof obj !== 'object') return 0;
 	return ['bronze', 'silver', 'gold', 'platinum'].reduce((sum, k) => sum + (Number(obj[k]) || 0), 0);
+}
+
+function psnCategoryToPlatform(category) {
+	const map = {
+		'ps5_native_game': 'PS5',
+		'ps5_crossgen_bundle': 'PS5',
+		'ps5_ps4_bundle': 'PS5',
+		'ps4_game': 'PS4',
+		'ps4_crossgen_bundle': 'PS4',
+		'ps3_game': 'PS3',
+		'psvita_game': 'PSVITA',
+		'psp_game': 'PSP',
+		'pspc_game': 'PC',
+		'psvr_game': 'PSVR'
+	};
+	return map[String(category || '').trim()] || '';
 }
 
 class SteamSyncPlugin extends Plugin {
@@ -656,68 +676,105 @@ class SteamSyncPlugin extends Plugin {
 		return this.fetchPsnGamesFromGameList();
 	}
 
+	throwPsnError(resp, ctx) {
+		const label = ctx ? `PSN ${ctx}` : 'PSN 接口';
+		if (resp.status === 401) {
+			const hasRefresh = !!(String(this.settings.psnRefreshToken || '').trim());
+			throw new Error(hasRefresh
+				? 'PSN 认证失败：Access Token 与 Refresh Token 均无效，请重新通过 psn-api 获取并填写'
+				: 'PSN Access Token 无效或已过期（401），请在设置中填写 Refresh Token 以便自动刷新，或重新获取 Access Token');
+		}
+		if (resp.status === 403) throw new Error(`${label}请求被拒绝（403），可能需要检查 Token 权限或 PSN 隐私设置`);
+		if (resp.status === 429) throw new Error(`${label}请求过于频繁（429），请稍后再试`);
+		if (resp.status < 200 || resp.status >= 300) {
+			const body = resp.text || '';
+			console.error('[Steam Sync] PSN API HTTP', resp.status, body);
+			throw new Error(`${label}返回 HTTP ${resp.status}：${String(body).slice(0, 300)}`);
+		}
+	}
+
+	async psnGetJson(url, ctx) {
+		const resp = await this.psnGet(url);
+		this.throwPsnError(resp, ctx);
+		return resp.json || {};
+	}
+
+	async psnTitleTrophyMap(npTitleIds) {
+		const map = new Map();
+		const unique = [...new Set(npTitleIds)].filter((id) => id && !/^psn-/i.test(String(id)));
+		for (let i = 0; i < unique.length; i += 30) {
+			await this.psnFetchTitleTrophyChunk(unique.slice(i, i + 30), map);
+			await sleep(80);
+		}
+		return map;
+	}
+
+	async psnFetchTitleTrophyChunk(ids, map) {
+		if (!ids.length) return;
+		const url = `https://m.np.playstation.com/api/trophy/v1/users/me/titles/trophyTitles?npTitleIds=${ids.map((x) => encodeURIComponent(String(x))).join(',')}`;
+		const resp = await this.psnGet(url);
+		if (resp.status === 404) {
+			if (ids.length === 1) {
+				console.warn('[Steam Sync] PSN 奖杯映射未找到 titleId：' + ids[0]);
+				return;
+			}
+			const mid = Math.ceil(ids.length / 2);
+			await this.psnFetchTitleTrophyChunk(ids.slice(0, mid), map);
+			await sleep(60);
+			await this.psnFetchTitleTrophyChunk(ids.slice(mid), map);
+			return;
+		}
+		this.throwPsnError(resp, '奖杯标题映射');
+		const json = resp.json || {};
+		for (const entry of Array.isArray(json.titles) ? json.titles : []) {
+			for (const tt of Array.isArray(entry.trophyTitles) ? entry.trophyTitles : []) {
+				if (entry.npTitleId && tt.npCommunicationId) map.set(String(entry.npTitleId), tt);
+			}
+		}
+	}
+
 	async fetchPsnGamesFromGameList() {
 		if (!String(this.settings.psnAccessToken || '').trim()) throw new Error('请先在设置中填写 PSN Access Token');
 
-		let allTitles = [];
+		const allTitles = [];
 		let offset = 0;
 		const limit = 200;
 		while (true) {
-			const url = `https://m.np.playstation.com/api/gamelist/v2/users/me/titles?limit=${limit}&offset=${offset}`;
-			let resp;
-			try {
-				resp = await this.psnGet(url);
-			} catch (e) {
-				console.error('[Steam Sync] PSN gamelist 网络异常', e);
-				throw new Error(`PSN 游戏列表网络异常（${e.message || e}）`);
-			}
-			if (resp.status === 401) {
-				const hasRefresh = !!(String(this.settings.psnRefreshToken || '').trim());
-				throw new Error(hasRefresh
-					? 'PSN 认证失败：Access Token 与 Refresh Token 均无效，请重新通过 psn-api 获取并填写'
-					: 'PSN Access Token 无效或已过期（401），请在设置中填写 Refresh Token 以便自动刷新，或重新获取 Access Token');
-			}
-			if (resp.status === 403) throw new Error('PSN 请求被拒绝（403），可能需要检查 Token 权限或 PSN 隐私设置');
-			if (resp.status === 429) throw new Error('PSN 请求过于频繁（429），请稍后再试');
-			if (resp.status < 200 || resp.status >= 300) {
-				const body = resp.text || '';
-				console.error('[Steam Sync] PSN gamelist HTTP', resp.status, body);
-				throw new Error(`PSN 游戏列表返回 HTTP ${resp.status}：${String(body).slice(0, 300)}`);
-			}
-			const json = resp.json;
+			const json = await this.psnGetJson(`https://m.np.playstation.com/api/gamelist/v2/users/me/titles?limit=${limit}&offset=${offset}`, '游戏列表');
 			const titles = (json && Array.isArray(json.titles)) ? json.titles : [];
-			allTitles = allTitles.concat(titles);
+			allTitles.push(...titles);
 			const nextOffset = json && json.nextOffset;
 			if (nextOffset == null || titles.length === 0) break;
 			offset = nextOffset;
 			await sleep(80);
 		}
 
-		const trophyMap = this.settings.syncAchievements ? await this.fetchPsnTrophyTitles() : new Map();
+		const idMap = this.settings.syncAchievements
+			? await this.psnTitleTrophyMap(allTitles.map((t) => String(firstDefined(t.titleId, t.npTitleId, t.conceptId, t.id))).filter(Boolean))
+			: new Map();
 
 		return allTitles.map((t, idx) => {
 			const cover = firstDefined(t.imageUrl, t.localizedImageUrl, t.conceptIconUrl, t.coverUrl, '');
 			const name = firstDefined(t.name, t.localizedName, t.titleName, t.title, `PSN 游戏 ${idx + 1}`);
-			const trophy = trophyMap.get(normalizeName(name));
-			let achievements = '';
-			let npCommunicationId = '';
-			if (trophy) {
-				const earned = sumTrophyCounts(trophy.earnedTrophies);
-				const defined = sumTrophyCounts(trophy.definedTrophies);
-				if (defined > 0) achievements = `${earned}/${defined}`;
-				npCommunicationId = String(trophy.npCommunicationId || '');
-			}
+			const titleId = String(firstDefined(t.titleId, t.npTitleId, t.conceptId, t.id, `psn-${idx}`));
+			const trophy = idMap.get(titleId);
+			const defined = trophy ? sumTrophyCounts(trophy.definedTrophies) : 0;
+			const earned = trophy ? sumTrophyCounts(trophy.earnedTrophies) : 0;
 			return {
-				id: String(firstDefined(t.titleId, t.npTitleId, t.conceptId, t.id, `psn-${idx}`)),
-				npCommunicationId,
+				id: titleId,
+				npCommunicationId: trophy ? String(trophy.npCommunicationId || '') : '',
 				name,
+				psnPlatform: psnCategoryToPlatform(t.category),
 				platform: 'PSN',
 				source: 'PSN',
 				playtime_forever: parseDurationToMinutes(firstDefined(t.playDuration, t.playedDuration, t.totalPlayTime, 0)),
 				rtime_last_played: parseIsoDateToTimestamp(firstDefined(t.lastPlayedDateTime, t.lastPlayedDate, '')),
 				cover,
 				thumbnail: cover,
-				achievements,
+				achievements: defined > 0 ? `${earned}/${defined}` : '',
+				trophyEarned: earned,
+				trophyDefined: defined,
+				trophyRate: trophy ? (Number(trophy.progress) || 0) : 0,
 				raw: t
 			};
 		});
@@ -730,20 +787,10 @@ class SteamSyncPlugin extends Plugin {
 		let offset = 0;
 		const limit = 200;
 		while (true) {
-			const url = `https://m.np.playstation.com/api/trophy/v1/users/me/trophyTitles?limit=${limit}&offset=${offset}`;
-			const resp = await this.psnGet(url);
-			if (resp.status === 401) {
-				const hasRefresh = !!(String(this.settings.psnRefreshToken || '').trim());
-				throw new Error(hasRefresh
-					? 'PSN 认证失败：Access Token 与 Refresh Token 均无效，请重新通过 psn-api 获取并填写'
-					: 'PSN Access Token 无效或已过期（401），请在设置中填写 Refresh Token 以便自动刷新，或重新获取 Access Token');
-			}
-			if (resp.status === 403) throw new Error('PSN 请求被拒绝（403），可能需要检查 Token 权限或 PSN 隐私设置');
-			if (resp.status === 429) throw new Error('PSN 请求过于频繁（429），请稍后再试');
-			if (resp.status < 200 || resp.status >= 300) break;
-			const list = (resp.json && Array.isArray(resp.json.trophyTitles)) ? resp.json.trophyTitles : [];
+			const json = await this.psnGetJson(`https://m.np.playstation.com/api/trophy/v1/users/me/trophyTitles?limit=${limit}&offset=${offset}`, '奖杯游戏列表');
+			const list = (json && Array.isArray(json.trophyTitles)) ? json.trophyTitles : [];
 			all.push(...list);
-			const nextOffset = resp.json && resp.json.nextOffset;
+			const nextOffset = json && json.nextOffset;
 			if (nextOffset == null || list.length === 0) break;
 			offset = nextOffset;
 			await sleep(80);
@@ -774,44 +821,53 @@ class SteamSyncPlugin extends Plugin {
 		});
 	}
 
-	async fetchPsnTrophyTitles() {
-		const map = new Map();
+	async fetchPsnTrophyPage(url) {
+		let resp;
 		try {
-			let offset = 0;
-			const limit = 800;
-			while (true) {
-				const url = `https://m.np.playstation.com/api/trophy/v1/users/me/trophyTitles?limit=${limit}&offset=${offset}`;
-				const resp = await this.psnGet(url);
-				if (resp.status < 200 || resp.status >= 300) break;
-				const list = (resp.json && Array.isArray(resp.json.trophyTitles)) ? resp.json.trophyTitles : [];
-				for (const tt of list) {
-					map.set(normalizeName(tt.trophyTitleName), tt);
-				}
-				const nextOffset = resp.json && resp.json.nextOffset;
-				if (nextOffset == null || list.length === 0) break;
-				offset = nextOffset;
-				await sleep(80);
-			}
+			resp = await this.psnGet(url);
 		} catch (e) {
-			console.warn('[Steam Sync] PSN 奖杯标题获取失败', e);
+			return { status: 0, json: null };
 		}
-		return map;
+		return { status: resp.status, json: resp.status >= 200 && resp.status < 300 && resp.json ? resp.json : null };
 	}
 
-	async fetchPsnTrophies(npCommunicationId) {
-		const empty = { available: false, reason: 'none', unlocked: 0, total: 0, items: [] };
-		if (!npCommunicationId) return empty;
+	async fetchPsnTrophies(npCommunicationId, summary) {
+		const fallbackEarned = summary && summary.earned ? Number(summary.earned) || 0 : 0;
+		const fallbackDefined = summary && summary.defined ? Number(summary.defined) || 0 : 0;
+		const hasSummary = fallbackDefined > 0;
+		if (!npCommunicationId) {
+			return hasSummary
+				? { available: true, reason: 'summary', unlocked: fallbackEarned, total: fallbackDefined, items: [], trophies: { earned: fallbackEarned, defined: fallbackDefined } }
+				: { available: false, reason: 'none', unlocked: 0, total: 0, items: [] };
+		}
 		try {
-			const defResp = await this.psnGet(`https://m.np.playstation.com/api/trophy/v1/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`);
-			const defs = (defResp.status >= 200 && defResp.status < 300 && defResp.json && Array.isArray(defResp.json.trophies)) ? defResp.json.trophies : [];
+			const defs = await this.fetchPsnTrophyPage(`https://m.np.playstation.com/api/trophy/v1/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`);
+			if (!(defs.status >= 200 && defs.status < 300) || !defs.json) {
+				if (hasSummary) {
+					console.warn('[Steam Sync] PSN Trophy API detail 不可用，仅使用汇总数据', npCommunicationId, 'HTTP', defs.status);
+					return { available: true, reason: 'summary', unlocked: fallbackEarned, total: fallbackDefined, items: [], trophies: { earned: fallbackEarned, defined: fallbackDefined } };
+				}
+				if (defs.status === 404 || defs.status === 403) {
+					console.warn('[Steam Sync] PSN game has no trophy data', npCommunicationId, 'HTTP', defs.status);
+					return { available: false, reason: 'none', unlocked: 0, total: 0, items: [] };
+				}
+				console.error('[Steam Sync] PSN Trophy API error', npCommunicationId, 'HTTP', defs.status);
+				return { available: false, reason: 'error', unlocked: 0, total: 0, items: [] };
+			}
 
-			const earnedResp = await this.psnGet(`https://m.np.playstation.com/api/trophy/v1/users/me/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`);
-			const earnedList = (earnedResp.status >= 200 && earnedResp.status < 300 && earnedResp.json && Array.isArray(earnedResp.json.trophies)) ? earnedResp.json.trophies : [];
+			const earned = await this.fetchPsnTrophyPage(`https://m.np.playstation.com/api/trophy/v1/users/me/npCommunicationIds/${encodeURIComponent(npCommunicationId)}/trophyGroups/all/trophies`);
+			if (earned.status === 0 || (earned.status >= 500 && earned.status < 600)) {
+				console.error('[Steam Sync] PSN Trophy API error (earned)', npCommunicationId, 'HTTP', earned.status);
+				return { available: false, reason: 'error', unlocked: 0, total: 0, items: [] };
+			}
+
+			const defList = Array.isArray(defs.json.trophies) ? defs.json.trophies : [];
+			const earnedList = earned.status >= 200 && earned.status < 300 && earned.json && Array.isArray(earned.json.trophies) ? earned.json.trophies : [];
 
 			const earnedById = new Map();
 			for (const e of earnedList) earnedById.set(String(e.trophyId), e);
 
-			const items = defs.map((d) => {
+			const items = defList.map((d) => {
 				const e = earnedById.get(String(d.trophyId));
 				return {
 					id: String(d.trophyId),
@@ -834,8 +890,8 @@ class SteamSyncPlugin extends Plugin {
 				items
 			};
 		} catch (e) {
-			console.warn('[Steam Sync] PSN 奖杯获取失败', npCommunicationId, e);
-			return empty;
+			console.error('[Steam Sync] PSN Trophy API error', npCommunicationId, e.message || e);
+			return { available: false, reason: 'error', unlocked: 0, total: 0, items: [] };
 		}
 	}
 
@@ -1210,13 +1266,16 @@ getXboxAuthHeaders() {
 			}
 		} else if (platform === 'psn') {
 			if (this.settings.syncAchievements) {
-				ach = await this.fetchPsnTrophies(game.npCommunicationId);
+				ach = await this.fetchPsnTrophies(game.npCommunicationId, { earned: game.trophyEarned, defined: game.trophyDefined });
 				showPercent = true;
 			}
 		}
 
 		if (ach && ach.available) {
 			updates.成就 = `${ach.unlocked}/${ach.total}`;
+		} else if (ach && ach.reason === 'error') {
+			// API 请求失败：不覆盖已有成就数据，避免把原有 Trophy 清空
+			console.warn('[Steam Sync] PSN 奖杯获取失败，保留已有成就数据', game.name);
 		} else if (ach && ach.reason === 'none') {
 			updates.成就 = game.achievements || '无';
 		} else if (game.achievements) {
@@ -1226,7 +1285,7 @@ getXboxAuthHeaders() {
 		updates[config.appidKey] = game.id;
 		await this.updateFrontmatter(file, updates);
 
-		if (this.settings.writeAchievementList && ach && ach.available) {
+		if (this.settings.writeAchievementList && ach && ach.available && ach.reason === 'ok') {
 			await this.upsertAchievementSection(
 				file,
 				formatAchievementList(ach, this.settings.includeLockedAchievements, showPercent)
@@ -1255,10 +1314,14 @@ getXboxAuthHeaders() {
 			}
 		} else if (platform === 'psn') {
 			if (this.settings.syncAchievements) {
-				const ach = await this.fetchPsnTrophies(game.npCommunicationId);
+				const ach = await this.fetchPsnTrophies(game.npCommunicationId, { earned: game.trophyEarned, defined: game.trophyDefined });
 				achievements = ach.available ? `${ach.unlocked}/${ach.total}` : (game.achievements || '无');
-				if (this.settings.writeAchievementList && ach.available) {
-					achievement_list = formatAchievementList(ach, this.settings.includeLockedAchievements, true);
+				if (this.settings.writeAchievementList) {
+					if (ach.reason === 'ok') {
+						achievement_list = formatAchievementList(ach, this.settings.includeLockedAchievements, true);
+					} else if (ach.reason === 'summary') {
+						achievement_list = formatTrophySummaryNote(ach);
+					}
 				}
 			}
 		}
